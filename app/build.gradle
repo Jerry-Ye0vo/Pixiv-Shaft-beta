@@ -89,7 +89,7 @@ android {
         minSdkVersion 24
         targetSdkVersion 36
         versionCode 43500
-        versionName "4.9.8"
+        versionName "4.9.8.beta"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             // Production remains arm64-only. CI can request x86_64 so instrumented tests run on
@@ -179,8 +179,8 @@ android {
             testProguardFiles 'proguard-test-rules.pro'
             signingConfig = hasShaftKeystore ? signingConfigs.shaft : signingConfigs.debug
 
-            applicationIdSuffix ".pshaft"
-            resValue "string", "app_name", "Shaft"
+            applicationIdSuffix ".pshaft.beta"
+            resValue "string", "app_name", "Shaft.beta"
         }
     }
 
