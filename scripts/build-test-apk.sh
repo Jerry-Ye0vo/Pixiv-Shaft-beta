@@ -22,7 +22,7 @@ Usage: bash scripts/build-test-apk.sh [options]
 Requires JDK 17+ and an Android SDK (ANDROID_HOME, ANDROID_SDK_ROOT,
 or local.properties). First build downloads the Gradle toolchain, SDK/native
 components and dependencies; later builds reuse Gradle/build caches.
-The GitHub debug variant installs as Shaft(Debug), alongside the release app.
+Installs as Shaft.beta (ceui.pixiv.pshaft.beta), alongside the original app.
 USAGE
 }
 
@@ -55,7 +55,7 @@ if $install_apk; then
     "$adb_bin" get-state >/dev/null
 fi
 
-gradle_args=(--parallel --build-cache --console=plain "-PSHAFT_TEST_ABI=$abi")
+gradle_args=(--parallel --build-cache --console=plain "-PSHAFT_TEST_ABI=$abi" -PSHAFT_BETA_TEST=true)
 if $offline; then gradle_args+=(--offline); fi
 cd "$repo_root"
 if $run_tests; then
@@ -74,10 +74,13 @@ revision="$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || printf loc
 mkdir -p "$output_dir"
 artifact="$output_dir/pixiv-shaft-beta-$revision-$abi-debug.apk"
 cp "${apks[0]}" "$artifact"
-if command -v sha256sum >/dev/null; then
-    sha256sum "$artifact" > "$artifact.sha256"
-else
-    shasum -a 256 "$artifact" > "$artifact.sha256"
-fi
+(
+    cd "$output_dir"
+    if command -v sha256sum >/dev/null; then
+        sha256sum "${artifact##*/}" > "${artifact##*/}.sha256"
+    else
+        shasum -a 256 "${artifact##*/}" > "${artifact##*/}.sha256"
+    fi
+)
 printf 'APK: %s\n' "$artifact"
 if $install_apk; then "$adb_bin" install -r "$artifact"; fi

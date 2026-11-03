@@ -15,6 +15,9 @@ apply plugin: 'com.google.firebase.crashlytics'
 def shaftEventsHmacProvider = providers.gradleProperty('SHAFT_EVENTS_HMAC')
         .orElse(providers.environmentVariable('SHAFT_EVENTS_HMAC'))
         .orElse('')
+// Quick test builds keep the historical beta identity so they can use the same test data.
+def shaftBetaTestBuild = providers.gradleProperty('SHAFT_BETA_TEST')
+        .map { it.toBoolean() }.getOrElse(false)
 def generatedShaftSecretsDir = layout.buildDirectory.dir('generated/shaft-secrets')
 def generatedShaftSecretsHeader = generatedShaftSecretsDir.map {
     it.file('shaft_secrets.generated.h')
@@ -166,8 +169,8 @@ android {
             // debug 也用正式 key（有的话）：跟历史行为一致，debug 包能覆盖安装旧 debug 包
             signingConfig = hasShaftKeystore ? signingConfigs.shaft : signingConfigs.debug
 
-            applicationIdSuffix ".cshaft"
-            resValue "string", "app_name", "Shaft(Debug)"
+            applicationIdSuffix shaftBetaTestBuild ? ".pshaft.beta" : ".cshaft.beta"
+            resValue "string", "app_name", shaftBetaTestBuild ? "Shaft.beta" : "Shaft.beta(Debug)"
         }
         release {
             minifyEnabled true
@@ -177,8 +180,8 @@ android {
             testProguardFiles 'proguard-test-rules.pro'
             signingConfig = hasShaftKeystore ? signingConfigs.shaft : signingConfigs.debug
 
-            applicationIdSuffix ".pshaft"
-            resValue "string", "app_name", "Shaft"
+            applicationIdSuffix ".pshaft.beta"
+            resValue "string", "app_name", "Shaft.beta"
         }
     }
 

@@ -40,8 +40,32 @@ jobs:
           packages: platform-tools
           log-accepted-android-sdk-licenses: false
       - uses: gradle/actions/setup-gradle@v4
+      - name: Reuse configured signing key when available
+        env:
+          KEYSTORE_B64: ${{ secrets.SHAFT_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.SHAFT_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.SHAFT_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.SHAFT_KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/beta-keystore.jks"
+            chmod 600 "$RUNNER_TEMP/beta-keystore.jks"
+            {
+              echo "storeFile=$RUNNER_TEMP/beta-keystore.jks"
+              echo "storePassword=$KEYSTORE_PASSWORD"
+              echo "keyAlias=$KEY_ALIAS"
+              echo "keyPassword=$KEY_PASSWORD"
+            } > keystore.properties
+            chmod 600 keystore.properties
+          fi
       - name: Build incremental test APK
         run: bash scripts/build-test-apk.sh --test
+      - name: Verify beta application ID
+        run: |
+          apk=(dist/test-apk/*.apk)
+          package_id="$(apkanalyzer manifest application-id "${apk[0]}")"
+          test "$package_id" = 'ceui.pixiv.pshaft.beta'
+          echo "Verified application ID: $package_id"
       - name: Upload APK and checksum
         uses: actions/upload-artifact@v4
         with:
