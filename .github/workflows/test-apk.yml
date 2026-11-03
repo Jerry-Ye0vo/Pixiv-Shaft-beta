@@ -1,0 +1,55 @@
+name: Quick test APK
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [classic]
+    paths:
+      - 'app/**'
+      - 'scripts/build-test-apk.sh'
+      - '.github/workflows/test-apk.yml'
+  push:
+    branches: [classic]
+    paths:
+      - 'app/**'
+      - 'scripts/build-test-apk.sh'
+      - '.github/workflows/test-apk.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quick-test-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    name: Selection tests and debug APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build incremental test APK
+        run: bash scripts/build-test-apk.sh --test
+      - name: Upload APK and checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixiv-shaft-beta-test-${{ github.sha }}
+          path: dist/test-apk/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: page-selection-test-reports
+          path: app/build/reports/tests/
+          if-no-files-found: ignore
