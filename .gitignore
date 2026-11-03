@@ -21,3 +21,6 @@ ncnn.zip
 /keystore.properties
 /dist/test-apk/
 /.beta-signing/
+/.beta-build-revision
+/.beta-build-revision.lock/
+/.beta-build-revision.tmp.*

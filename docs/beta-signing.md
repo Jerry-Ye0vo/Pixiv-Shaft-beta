@@ -23,7 +23,9 @@
 
 ## 版本迭代
 
-`gradle.properties` 中的 `SHAFT_BETA_REVISION=1` 对应 `4.9.9-beta.1 / 43601`。发布下一轮时将该值递增；版本名和 Android versionCode 一起递增，保持安装包名和私钥不变。
+GitHub Actions 每个新构建以工作流序号 N 自动生成 `4.9.9-beta.N` 和 `43600 + N`；同一构建重跑保留版本号，失败构建可能使序号跳过。手动运行工作流时可在 revision 输入框覆盖编号，用于衔接比云端序号更高的本地版本。工作流读取 APK 清单核验实际版本，版本也出现在 APK 文件名与 `build-info.txt` 中。
+
+本地脚本从 `gradle.properties` 的 `SHAFT_BETA_REVISION=2` 起自动递增，计数保存在不提交到 Git 的 `.beta-build-revision`。两次本地构建不会分配相同编号，构建失败也不回收编号。显式指定可用 `bash scripts/build-test-apk.sh --revision 20`；切换云端/本地构建来源时应选择高于已安装版本的编号。包名和固定私钥始终沿用同一份。
 
 本地构建可继续使用未跟踪的 `keystore.properties` 或 `SHAFT_KEYSTORE_*` 环境变量。快速脚本显式启用固定签名校验；常规单元测试不受此出包要求影响。
 

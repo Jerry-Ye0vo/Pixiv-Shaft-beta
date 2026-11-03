@@ -2,11 +2,18 @@ name: Quick test APK
 
 on:
   workflow_dispatch:
+    inputs:
+      revision:
+        description: Optional Beta iteration override (1..9999); blank uses the workflow number
+        required: false
+        type: string
+        default: ''
   push:
     branches: [classic]
     paths:
       - 'app/**'
       - 'scripts/build-test-apk.sh'
+      - 'scripts/test-build-test-apk.py'
       - 'gradle.properties'
       - 'config/beta-signing-cert.sha256'
       - '.github/workflows/test-apk.yml'
@@ -27,6 +34,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      - name: Test build script and automatic versions
+        run: python3 scripts/test-build-test-apk.py
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -68,8 +77,12 @@ jobs:
             echo "keyPassword=$KEY_PASSWORD"
           } > keystore.properties
       - name: Build incremental test APK
-        run: bash scripts/build-test-apk.sh --test
+        env:
+          BETA_REVISION: ${{ inputs.revision || github.run_number }}
+        run: bash scripts/build-test-apk.sh --test --revision "$BETA_REVISION"
       - name: Verify Beta package, version and signing certificate
+        env:
+          BETA_REVISION: ${{ inputs.revision || github.run_number }}
         run: |
           apk=(dist/test-apk/*.apk)
           package_id="$(apkanalyzer manifest application-id "${apk[0]}")"
@@ -77,6 +90,8 @@ jobs:
           echo "Verified application ID: $package_id"
           version_name="$(apkanalyzer manifest version-name "${apk[0]}")"
           version_code="$(apkanalyzer manifest version-code "${apk[0]}")"
+          test "$version_name" = "4.9.9-beta.$BETA_REVISION"
+          test "$version_code" -eq "$((43600 + BETA_REVISION))"
           tools=("$ANDROID_HOME"/build-tools/*/apksigner)
           signing_report="$("${tools[${#tools[@]}-1]}" verify --verbose --print-certs "${apk[0]}")"
           certificate="$(printf '%s\n' "$signing_report" | awk -F': ' '/^Signer #1 certificate SHA-256 digest: / {print tolower($2)}')"
@@ -88,6 +103,7 @@ jobs:
             echo "versionCode=$version_code"
             echo "certificateSha256=$certificate"
             echo "commit=${{ github.sha }}"
+            echo "iteration=$BETA_REVISION"
           } | tee dist/test-apk/build-info.txt
       - name: Upload APK and checksum
         uses: actions/upload-artifact@v4

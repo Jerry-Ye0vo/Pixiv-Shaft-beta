@@ -19,7 +19,7 @@ def shaftEventsHmacProvider = providers.gradleProperty('SHAFT_EVENTS_HMAC')
 def shaftBetaTestBuild = providers.gradleProperty('SHAFT_BETA_TEST')
         .map { it.toBoolean() }.getOrElse(false)
 def shaftBetaRevision = providers.gradleProperty('SHAFT_BETA_REVISION')
-        .map { it.toInteger() }.getOrElse(1)
+        .map { it.toInteger() }.getOrElse(2)
 if (shaftBetaRevision < 1 || shaftBetaRevision > 9999) {
     throw new GradleException('SHAFT_BETA_REVISION must be between 1 and 9999')
 }
