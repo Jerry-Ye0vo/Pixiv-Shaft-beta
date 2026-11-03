@@ -13,7 +13,7 @@ beta_revision="${SHAFT_BETA_REVISION:-}"
 usage() {
     cat <<'USAGE'
 Usage: bash scripts/build-test-apk.sh [options]
-  --test          Run page-selection unit tests before packaging
+  --test          Run page-selection and save-recovery tests before packaging
   --install       Install the resulting APK on the single connected adb device
   --abi ABI       arm64-v8a (default) or x86_64 (emulator)
   --output DIR    APK/checksum destination (default: dist/test-apk)
@@ -116,7 +116,9 @@ if $offline; then gradle_args+=(--offline); fi
 cd "$repo_root"
 if $run_tests; then
     bash ./gradlew :app:testGithubDebugUnitTest \
-        --tests ceui.pixiv.ui.download.PageDownloadSelectionTest "${gradle_args[@]}"
+        --tests ceui.pixiv.ui.download.PageDownloadSelectionTest \
+        --tests ceui.pixiv.download.ImagePageSaveJournalTest \
+        --tests ceui.pixiv.download.ImagePageSaverRecoveryTest "${gradle_args[@]}"
 fi
 bash ./gradlew :app:assembleGithubDebug "${gradle_args[@]}"
 
