@@ -23,9 +23,9 @@ bash scripts/build-test-apk.sh --test --install
 bash scripts/build-test-apk.sh --abi x86_64
 ```
 
-默认构建 arm64-v8a 的 GitHub Debug 包，复用增量缓存，不执行 clean 或 release 混淆。APK 与 SHA-256 输出到 `dist/test-apk/`。`--install` 要求 adb 仅连接一台设备。脚本通过 `-PSHAFT_BETA_TEST=true` 使用历史 Beta 包名 `ceui.pixiv.pshaft.beta`，应用名为 `Shaft.beta`，可与原版共存。普通开发 Debug 使用 `ceui.pixiv.cshaft.beta`，Release 使用 `ceui.pixiv.pshaft.beta`。覆盖已有 Beta 安装要求签名相同；沿用本机 keystore 配置或仓库的 `SHAFT_KEYSTORE_*` 签名 Secrets，未配置则回退到默认 Debug 签名。
+默认构建 arm64-v8a 的 GitHub Debug 包，复用增量缓存，不执行 clean 或 release 混淆。APK 与 SHA-256 输出到 `dist/test-apk/`。`--install` 要求 adb 仅连接一台设备。脚本通过 `-PSHAFT_BETA_TEST=true` 使用历史 Beta 包名 `ceui.pixiv.pshaft.beta`，应用名为 `Shaft.beta`，可与原版共存。普通开发 Debug 使用 `ceui.pixiv.cshaft.beta`，Release 使用 `ceui.pixiv.pshaft.beta`。覆盖已有 Beta 安装要求签名相同；沿用本机 keystore 配置或仓库的 `SHAFT_KEYSTORE_*` 签名 Secrets，快速脚本缺少固定签名时停止，避免生成不同的安装签名。
 
-也可进入 GitHub Actions → **Quick test APK** → **Run workflow**，完成后下载 `pixiv-shaft-beta-test-*` artifact。该流程不需要官方签名或服务密钥；部分依赖官方凭据的线上功能维持 fork 的原有可用范围。
+也可进入 GitHub Actions → **Quick test APK** → **Run workflow**，完成后下载 `pixiv-shaft-beta-test-*` artifact。先按 [Beta 固定签名](beta-signing.md) 配置仓库自己的签名 Secrets；不需要官方服务密钥。部分依赖官方凭据的线上功能维持 fork 的原有可用范围。
 
 ## 验收场景
 

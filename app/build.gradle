@@ -18,6 +18,13 @@ def shaftEventsHmacProvider = providers.gradleProperty('SHAFT_EVENTS_HMAC')
 // Quick test builds keep the historical beta identity so they can use the same test data.
 def shaftBetaTestBuild = providers.gradleProperty('SHAFT_BETA_TEST')
         .map { it.toBoolean() }.getOrElse(false)
+def shaftBetaRevision = providers.gradleProperty('SHAFT_BETA_REVISION')
+        .map { it.toInteger() }.getOrElse(1)
+if (shaftBetaRevision < 1 || shaftBetaRevision > 9999) {
+    throw new GradleException('SHAFT_BETA_REVISION must be between 1 and 9999')
+}
+def requireBetaSigning = providers.gradleProperty('SHAFT_REQUIRE_BETA_SIGNING')
+        .map { it.toBoolean() }.getOrElse(false)
 def generatedShaftSecretsDir = layout.buildDirectory.dir('generated/shaft-secrets')
 def generatedShaftSecretsHeader = generatedShaftSecretsDir.map {
     it.file('shaft_secrets.generated.h')
@@ -89,8 +96,8 @@ android {
         applicationId "ceui.pixiv"
         minSdkVersion 24
         targetSdkVersion 36
-        versionCode 43600
-        versionName "4.9.9"
+        versionCode 43600 + shaftBetaRevision
+        versionName "4.9.9-beta.${shaftBetaRevision}"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             // Production remains arm64-only. CI can request x86_64 so instrumented tests run on
@@ -135,6 +142,9 @@ android {
     def ksKeyAlias = ksProps.getProperty("keyAlias") ?: System.getenv("SHAFT_KEY_ALIAS")
     def ksKeyPassword = ksProps.getProperty("keyPassword") ?: System.getenv("SHAFT_KEY_PASSWORD")
     def hasShaftKeystore = ksStoreFile != null && rootProject.file(ksStoreFile).exists()
+    if (requireBetaSigning && (!hasShaftKeystore || !ksStorePassword || !ksKeyAlias || !ksKeyPassword)) {
+        throw new GradleException('Beta APK requires a fixed signing key. Configure keystore.properties or SHAFT_KEYSTORE_*; debug signing fallback is disabled for test APK builds.')
+    }
 
     signingConfigs {
         if (hasShaftKeystore) {

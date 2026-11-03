@@ -23,6 +23,8 @@ Requires JDK 17+ and an Android SDK (ANDROID_HOME, ANDROID_SDK_ROOT,
 or local.properties). First build downloads the Gradle toolchain, SDK/native
 components and dependencies; later builds reuse Gradle/build caches.
 Installs as Shaft.beta (ceui.pixiv.pshaft.beta), alongside the original app.
+A fixed signing key is required via keystore.properties or SHAFT_KEYSTORE_*.
+Increment SHAFT_BETA_REVISION in gradle.properties before a new Beta iteration.
 USAGE
 }
 
@@ -55,7 +57,8 @@ if $install_apk; then
     "$adb_bin" get-state >/dev/null
 fi
 
-gradle_args=(--parallel --build-cache --console=plain "-PSHAFT_TEST_ABI=$abi" -PSHAFT_BETA_TEST=true)
+gradle_args=(--parallel --build-cache --console=plain "-PSHAFT_TEST_ABI=$abi"
+    -PSHAFT_BETA_TEST=true -PSHAFT_REQUIRE_BETA_SIGNING=true)
 if $offline; then gradle_args+=(--offline); fi
 cd "$repo_root"
 if $run_tests; then
