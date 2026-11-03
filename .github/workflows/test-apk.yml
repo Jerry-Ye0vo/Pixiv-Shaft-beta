@@ -45,6 +45,17 @@ jobs:
           packages: platform-tools
           log-accepted-android-sdk-licenses: false
       - uses: gradle/actions/setup-gradle@v4
+      - name: Test page selection and save recovery
+        env:
+          BETA_REVISION: ${{ inputs.revision || github.run_number }}
+        run: |
+          bash ./gradlew :app:testGithubDebugUnitTest \
+            --tests ceui.pixiv.ui.download.PageDownloadSelectionTest \
+            --tests ceui.pixiv.download.ImagePageSaveJournalTest \
+            --tests ceui.pixiv.download.ImagePageSaverRecoveryTest \
+            --parallel --build-cache --console=plain \
+            -PSHAFT_TEST_ABI=arm64-v8a -PSHAFT_BETA_TEST=true \
+            "-PSHAFT_BETA_REVISION=$BETA_REVISION"
       - name: Require fixed Beta signing key
         env:
           KEYSTORE_B64: ${{ secrets.SHAFT_KEYSTORE_B64 }}
@@ -79,7 +90,7 @@ jobs:
       - name: Build incremental test APK
         env:
           BETA_REVISION: ${{ inputs.revision || github.run_number }}
-        run: bash scripts/build-test-apk.sh --test --revision "$BETA_REVISION"
+        run: bash scripts/build-test-apk.sh --revision "$BETA_REVISION"
       - name: Verify Beta package, version and signing certificate
         env:
           BETA_REVISION: ${{ inputs.revision || github.run_number }}
