@@ -12,7 +12,6 @@ import ceui.lisa.download.FileCreator
 import ceui.lisa.utils.Common
 import ceui.lisa.utils.PixivOperate
 import ceui.pixiv.api.model.Illust
-import ceui.pixiv.cache.OriginalImageCacheManager
 import ceui.pixiv.download.config.DownloadItems
 import ceui.pixiv.download.model.DownloadRecordSlim
 import ceui.pixiv.imageloader.PageImageSourceResolver
@@ -393,7 +392,7 @@ class ImagePageSaver internal constructor(
      */
     private suspend fun saveOriginal(key: PageKey, illust: Illust, page: Int, imageUrl: String): Boolean =
         withContext(ioDispatcher) {
-            val retained = OriginalImageCacheManager.retain(imageUrl)
+            val retained = ImageSaveCacheGuard.retain(imageUrl)
             try {
                 IllustCaptionExporter.export(illust)
                 var resolveError: Throwable? = null
@@ -491,7 +490,6 @@ class ImagePageSaver internal constructor(
                 }
             } finally {
                 retained.close()
-                OriginalImageCacheManager.trimAsync(app)
             }
         }
 
