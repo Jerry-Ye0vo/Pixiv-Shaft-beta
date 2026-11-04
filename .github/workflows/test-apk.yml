@@ -98,17 +98,34 @@ jobs:
         run: |
           apk=(dist/test-apk/*.apk)
           package_id="$(apkanalyzer manifest application-id "${apk[0]}")"
-          test "$package_id" = 'ceui.pixiv.pshaft.beta'
-          echo "Verified application ID: $package_id"
+          echo "APK application ID: $package_id"
+          if [ "$package_id" != 'ceui.pixiv.pshaft.beta' ]; then
+            echo "::error::APK package mismatch: expected ceui.pixiv.pshaft.beta; got $package_id"
+            exit 1
+          fi
           version_name="$(apkanalyzer manifest version-name "${apk[0]}")"
           version_code="$(apkanalyzer manifest version-code "${apk[0]}")"
-          test "$version_name" = "4.9.9-beta.$BETA_REVISION"
-          test "$version_code" -eq "$((43600 + BETA_REVISION))"
+          echo "APK version name: $version_name"
+          echo "APK version code: $version_code"
+          expected_version_code="$((43600 + BETA_REVISION))"
+          if [ "$version_name" != "4.9.9-beta.$BETA_REVISION" ]; then
+            echo "::error::APK version name mismatch: expected 4.9.9-beta.$BETA_REVISION; got $version_name"
+            exit 1
+          fi
+          if [ "$version_code" != "$expected_version_code" ]; then
+            echo "::error::APK version code mismatch: expected $expected_version_code; got $version_code"
+            exit 1
+          fi
           tools=("$ANDROID_HOME"/build-tools/*/apksigner)
           signing_report="$("${tools[${#tools[@]}-1]}" verify --verbose --print-certs "${apk[0]}")"
           certificate="$(printf '%s\n' "$signing_report" | awk -F': ' '/^Signer #1 certificate SHA-256 digest: / {print tolower($2)}')"
           expected="$(tr -d '[:space:]' < config/beta-signing-cert.sha256)"
-          test "$certificate" = "$expected"
+          echo "APK signing certificate SHA-256: $certificate"
+          if [ "$certificate" != "$expected" ]; then
+            printf '%s\n' "$signing_report"
+            echo "::error::APK signing certificate mismatch: expected $expected; got $certificate"
+            exit 1
+          fi
           {
             echo "applicationId=$package_id"
             echo "versionName=$version_name"
