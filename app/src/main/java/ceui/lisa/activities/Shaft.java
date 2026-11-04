@@ -553,6 +553,7 @@ public class Shaft extends Application implements ServicesProvider {
 
         // 单张原图保存：IO 读取持久化意图，恢复被回收进程留下的任务；不依赖打开下载页。
         // 排在设置、登录态与 Toast 就绪之后；构造器不读盘，start() 幂等。
+        ceui.pixiv.cache.OriginalImageCacheManager.installSaveProtection(this);
         imagePageSaver.start();
 
         // :feeds 列表框架的宿主装配（主题配色 / 空态插画 / 错误文案 / Toast / 网络恢复）。
@@ -1123,4 +1124,5 @@ public class Shaft extends Application implements ServicesProvider {
         return analytics;
     }
 }
+
 

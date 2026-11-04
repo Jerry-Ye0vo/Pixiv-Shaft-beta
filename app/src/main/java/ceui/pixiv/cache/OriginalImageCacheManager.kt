@@ -4,6 +4,7 @@ import android.content.Context
 import ceui.lisa.activities.Shaft
 import ceui.lisa.file.LegacyFile
 import ceui.pixiv.download.StageStore
+import ceui.pixiv.download.ImageSaveCacheGuard
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -21,6 +22,18 @@ object OriginalImageCacheManager {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val cacheLock = Any()
     private val retained = HashMap<String, Int>()
+
+    /** The PR #1317 adapter; the main save code has no dependency on this cache implementation. */
+    @JvmStatic
+    fun installSaveProtection(context: Context) {
+        val app = context.applicationContext
+        ImageSaveCacheGuard.install { url ->
+            val lease = retain(url)
+            Closeable {
+                try { lease.close() } finally { trimAsync(app) }
+            }
+        }
+    }
 
     /** Acquire before loading: quota eviction must not remove a source awaiting a save write. */
     @JvmStatic
@@ -226,4 +239,5 @@ object OriginalImageCacheManager {
         return if (ext.isNotEmpty() && ext.length in 2..5) ext else "dat"
     }
 }
+
 

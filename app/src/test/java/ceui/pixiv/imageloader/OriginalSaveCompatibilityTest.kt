@@ -4,6 +4,7 @@ import android.app.Application
 import ceui.lisa.activities.Shaft
 import ceui.lisa.utils.Settings
 import ceui.pixiv.cache.OriginalImageCacheManager
+import ceui.pixiv.download.ImageSaveCacheGuard
 import java.io.File
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -39,6 +40,7 @@ class OriginalSaveCompatibilityTest {
 
     @After fun tearDown() {
         ImageTaskRegistry.customFetcherResolver = null
+        ImageSaveCacheGuard.resetForTests()
         urls.forEach(ImageTaskRegistry::remove)
         OriginalImageCacheManager.clearAll(app)
         Dispatchers.resetMain()
@@ -89,7 +91,8 @@ class OriginalSaveCompatibilityTest {
         val url = "https://example.test/compat-clear-original.jpg".also(urls::add)
         val cached = File(OriginalImageCacheManager.getCacheDir(app),
             OriginalImageCacheManager.keyForUrl(url) + ".jpg").apply { writeText("save source") }
-        OriginalImageCacheManager.retain(url).use {
+        OriginalImageCacheManager.installSaveProtection(app)
+        ImageSaveCacheGuard.retain(url).use {
             OriginalImageCacheManager.clearAll(app)
             assertTrue(cached.exists())
         }
@@ -97,3 +100,4 @@ class OriginalSaveCompatibilityTest {
         assertFalse(cached.exists())
     }
 }
+
