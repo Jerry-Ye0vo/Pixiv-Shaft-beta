@@ -247,8 +247,16 @@ public class Manager {
         IO.execute(() -> {
             boolean failed = false;
             try {
-                List<DownloadItem> restored = readRestoredDownloads(
-                        AppDatabase.getAppDatabase(mContext).downloadDao(), Shaft.sGson);
+                AppDatabase database = AppDatabase.getAppDatabase(mContext);
+                try {
+                    ceui.pixiv.download.LegacyPageSaveMigration.migrate(mContext, database, Shaft.sGson);
+                } catch (Exception migrationError) {
+                    // Keep unreadable/failed legacy intents, but do not block the existing queue.
+                    Common.showLog("Legacy page save migration failed: " + migrationError.getMessage());
+                    Common.showToast(mContext.getString(R.string.save_image_failed,
+                            migrationError.getMessage()));
+                }
+                List<DownloadItem> restored = readRestoredDownloads(database.downloadDao(), Shaft.sGson);
                 if (restored.isEmpty()) return;
                 synchronized (this) {
                     if (generation != restoreGeneration) return; // User cleared the queue.
@@ -1978,3 +1986,4 @@ public class Manager {
         activeStageKeys.remove(StageStore.keyForUrl(url));
     }
 }
+

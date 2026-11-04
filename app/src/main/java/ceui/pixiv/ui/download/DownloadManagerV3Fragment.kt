@@ -186,7 +186,6 @@ class DownloadManagerV3Fragment : Fragment() {
                 }
 
                 R.id.action_pause_toggle -> {
-                    if (sharedVm.activeSection.value != 0) return@setOnMenuItemClickListener true
                     // 图标与动作同源：都用 currentToolbarAction() 现算（见 ActiveToolbarAction.kt），
                     // 不存第二份 UI 状态 —— 否则会出现「按钮显示继续、点下去却暂停」的错位。
                     when (currentToolbarAction()) {
@@ -219,7 +218,7 @@ class DownloadManagerV3Fragment : Fragment() {
         }
         fun applyMenuVisibility(pos: Int) {
             exportItem?.isVisible = pos == 0 || pos == 2
-            pauseToggleItem?.isVisible = pos == 1 && sharedVm.activeSection.value == 0
+            pauseToggleItem?.isVisible = pos == 1
             searchItem?.isVisible = pos == 2
             importItem?.isVisible = pos == 2
             // tab 切走时强制收起搜索框 + 清空 query，避免被遗留的 isIconified=false
@@ -230,11 +229,6 @@ class DownloadManagerV3Fragment : Fragment() {
         }
         applyMenuVisibility(pager.currentItem)
         sharedVm.setSelectedTab(pager.currentItem)
-        viewLifecycleOwner.lifecycleScope.launch {
-            viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
-                sharedVm.activeSection.collect { applyMenuVisibility(pager.currentItem) }
-            }
-        }
         pageCallback = object : ViewPager2.OnPageChangeCallback() {
             override fun onPageSelected(position: Int) {
                 sharedVm.setSelectedTab(position)
@@ -387,7 +381,7 @@ class DownloadManagerV3Fragment : Fragment() {
         override fun getItemCount(): Int = 3
         override fun createFragment(position: Int): Fragment = when (position) {
             0 -> QueueListV3Fragment()
-            1 -> ActiveTasksV3Fragment()
+            1 -> ActiveListV3Fragment()
             2 -> DoneListV3Fragment()
             else -> error("unreachable: $position")
         }
@@ -409,3 +403,4 @@ private fun List<DownloadItem>.toPauseToggleItems(): List<PauseToggleItem> {
         PauseToggleItem(state, willDispatch)
     }
 }
+

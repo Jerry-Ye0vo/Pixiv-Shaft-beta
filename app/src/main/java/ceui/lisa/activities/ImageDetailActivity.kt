@@ -22,6 +22,10 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.viewpager.widget.ViewPager
 import ceui.lisa.R
+import ceui.lisa.core.Manager
+import ceui.lisa.core.ManagerReactive
+import ceui.pixiv.ui.detail.resolvePageDownloadFabState
+import kotlinx.coroutines.Job
 import ceui.lisa.databinding.ActivityImageDetailBinding
 import ceui.lisa.databinding.ViewV3FabBarBinding
 import ceui.lisa.download.IllustDownload
@@ -359,6 +363,21 @@ class ImageDetailActivity : BaseActivity<ActivityImageDetailBinding?>() {
                         }
                         .distinctUntilChanged()
                         .collect { it?.let { (page, _) -> checkDownload(page) } }
+                }
+            }
+            lifecycleScope.launch {
+                repeatOnLifecycle(Lifecycle.State.STARTED) {
+                    launch {
+                        ManagerReactive.contentFlow
+                            .map { baseBind?.viewPager?.currentItem?.let { it to queuedPageFab(it) } }
+                            .distinctUntilChanged()
+                            .collect { it?.let { (page, _) -> checkDownload(page) } }
+                    }
+                    launch {
+                        ManagerReactive.doneTableInvalidations.collect {
+                            baseBind?.viewPager?.currentItem?.let(::checkDownload)
+                        }
+                    }
                 }
             }
             baseBind!!
@@ -873,21 +892,28 @@ class ImageDetailActivity : BaseActivity<ActivityImageDetailBinding?>() {
                 autoLikeAfterDownloadIfNeeded(illust, fabBar)
                 return@setOnClick
             }
-            // 按钮怎么画全由 checkDownload 按 imagePageSaver 的状态推导,这里只按状态分派:
-            // 保存中点一下 = 取消(开始写盘后不认,照常存完);其它(含上次失败的重试态)= 开始保存
             val key = ImagePageSaver.PageKey(illust.id, page)
-            if (imagePageSaver.states.value[key] is ImagePageSaver.PageState.Saving) {
-                imagePageSaver.cancel(key)
+            val translated = translatedFileOf(page)
+            if (translated != null) {
+                // Derived files keep their own save path; never register a translation as an original.
+                val state = imagePageSaver.states.value[key]
+                if (state is ImagePageSaver.PageState.Saving) imagePageSaver.cancel(key)
+                else imagePageSaver.save(illust, page, ImagePageSaver.Target.Translated(translated))
                 return@setOnClick
             }
-            // 这一页正显示译图:保存的就是看到的那张(原分辨率译图),不是底下的原图
-            val target =
-                translatedFileOf(page)?.let { ImagePageSaver.Target.Translated(it) }
-                    ?: (IllustDownload.getUrl(illust, page, Params.IMAGE_RESOLUTION_ORIGINAL)
-                        ?: IllustDownload.getUrl(illust, page, Params.IMAGE_RESOLUTION_LARGE))
-                        ?.let { ImagePageSaver.Target.Original(it) }
-                    ?: return@setOnClick
-            imagePageSaver.save(illust, page, target)
+            val manager = Manager.get()
+            val items = manager.contentSnapshot().filter { it.illust.id == illust.id && it.index == page }
+            if (items.isNotEmpty()) {
+                when (queuedPageFab(page)) {
+                    is DownloadFab.Downloading -> items.forEach { manager.stopOne(it.uuid) }
+                    else -> items.forEach { manager.startOne(it.uuid) }
+                }
+            } else {
+                IllustDownload.downloadIllustPagesWithResolution(
+                    illust, intArrayOf(page), Params.IMAGE_RESOLUTION_ORIGINAL, this,
+                )
+                autoLikeAfterDownloadIfNeeded(illust, fabBar)
+            }
         }
 
         fabBind.fabDownloadContainer.setOnLongClickListener {
@@ -955,12 +981,24 @@ class ImageDetailActivity : BaseActivity<ActivityImageDetailBinding?>() {
         syncAiOverlayForPage(viewPager.currentItem)
     }
 
+    private var pageDownloadCheckJob: Job? = null
+
+    private fun queuedPageFab(page: Int): DownloadFab? {
+        val illust = mIllust ?: return null
+        return resolvePageDownloadFabState(
+            Manager.get().contentSnapshot(), illust.id, page,
+            dispatchScheduled = Manager.get().willDispatch(illust.id),
+        )
+    }
+
     private fun checkDownload(i: Int) {
+        pageDownloadCheckJob?.cancel()
         val illust = mIllust ?: return
         val key = ImagePageSaver.PageKey(illust.id, i)
         val saveState = imagePageSaver.states.value[key]
         // 这一页还在保存(可能是上一个大图页发起的):进度圈,点一下取消
-        if (saveState is ImagePageSaver.PageState.Saving) {
+        val translatedFile = translatedFileOf(i)
+        if (translatedFile != null && saveState is ImagePageSaver.PageState.Saving) {
             fabBar?.renderDownload(DownloadFab.Downloading(saveState.percent))
             return
         }
@@ -968,7 +1006,7 @@ class ImageDetailActivity : BaseActivity<ActivityImageDetailBinding?>() {
         // 存译图失败后取消勾选「显示译图」,按钮存的就换成原图了,不该亮重试。
         val failedTarget = saveState?.target
         // 译图页的下载按钮保存的是译图,原图的「已下载」不代表译图存过,别亮绿勾误导;只认本进程存过的这张译图
-        translatedFileOf(i)?.let { file ->
+        translatedFile?.let { file ->
             fabBar?.renderDownload(
                 when {
                     imagePageSaver.isTranslationSaved(file) -> DownloadFab.Done
@@ -979,7 +1017,11 @@ class ImageDetailActivity : BaseActivity<ActivityImageDetailBinding?>() {
             )
             return
         }
-        lifecycleScope.launch {
+        queuedPageFab(i)?.let { state ->
+            fabBar?.renderDownload(state)
+            return
+        }
+        pageDownloadCheckJob = lifecycleScope.launch {
             val downloaded =
                 withContext(Dispatchers.IO) {
                     Common.isIllustDownloaded(illust, i)
@@ -989,13 +1031,12 @@ class ImageDetailActivity : BaseActivity<ActivityImageDetailBinding?>() {
             // 探测期间这页的译图到位了(重进看图页时译图在 onStart 才投影过来):按钮已按译图刷好
             if (translatedFileOf(i) != null) return@launch
             // 探测期间这页的保存状态变了(开始存 / 失败 / 存完):订阅会再刷一次,旧结果别盖掉
-            if (imagePageSaver.states.value[key] != saveState) return@launch
+            if (imagePageSaver.states.value[key] != saveState || queuedPageFab(i) != null) return@launch
             // 对齐一级 V3 详情页:已下载的页显示绿色「已下载」勾,而不是把按钮藏起来。已下载优先于
             // 上次的保存失败(之后批量下载可能已经把这页补上了);重试态与一级详情页「只剩失败页」同一个图标
             fabBar?.renderDownload(
                 when {
                     downloaded -> DownloadFab.Done
-                    failedTarget is ImagePageSaver.Target.Original -> DownloadFab.Resume(0)
                     else -> DownloadFab.Idle
                 }
             )
@@ -1642,3 +1683,4 @@ class ImageDetailActivity : BaseActivity<ActivityImageDetailBinding?>() {
         const val EXTRA_ENTER_BOUNDS = "enter_bounds"
     }
 }
+
