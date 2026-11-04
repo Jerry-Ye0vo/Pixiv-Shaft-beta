@@ -18,6 +18,7 @@ import com.hjq.toast.Toaster
 import java.io.File
 import java.io.Closeable
 import java.util.ArrayDeque
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -26,6 +27,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
@@ -153,12 +157,12 @@ class ImagePageSaverRecoveryTest {
         val db = Room.inMemoryDatabaseBuilder(app, AppDatabase::class.java).allowMainThreadQueries().build()
         ReflectionHelpers.setStaticField(AppDatabase::class.java, "INSTANCE", db)
         val result = CompletableDeferred<File>()
-        var acquired = 0
-        var released = 0
+        val acquired = AtomicInteger()
+        val released = AtomicInteger()
         ImageSaveCacheGuard.install {
             assertEquals(url, it)
-            acquired++
-            Closeable { released++ }
+            acquired.incrementAndGet()
+            Closeable { released.incrementAndGet() }
         }
         val display = ImageLoadTask(ImageRequest(url), scope, object : ImageFetcher {
             override suspend fun fetch(url: String, onProgress: (Int) -> Unit): File {
@@ -170,19 +174,24 @@ class ImagePageSaverRecoveryTest {
             display.start()
             val taskMap = ReflectionHelpers.getField<MutableMap<String, ImageLoadTask>>(ImageTaskRegistry, "taskMap")
             taskMap[url] = display
-            val saver = saver()
+            val saver = ImagePageSaver(app, Dispatchers.IO, scope)
             assertTrue(saver.save(illust, 3, ImagePageSaver.Target.Original(url)))
-            io.drain()
-            assertEquals(1, acquired)
-            assertEquals(0, released)
+            runBlocking {
+                withTimeout(5000) {
+                    saver.states.first { (it[key] as? ImagePageSaver.PageState.Saving)?.percent == 37 }
+                }
+            }
+            assertEquals(1, acquired.get())
+            assertEquals(0, released.get())
             assertTrue(saver.states.value[key] is ImagePageSaver.PageState.Saving)
             assertTrue(saver.cancel(key))
-            io.drain()
-            assertEquals(1, released)
+            runBlocking { withTimeout(5000) { saver.states.first { it.isEmpty() } } }
+            assertEquals(1, released.get())
             assertTrue(saver.states.value.isEmpty())
             assertTrue(journal.read().isEmpty())
             assertEquals(ImageLoadState.Loading(37), display.state.value)
             result.complete(File(app.cacheDir, "display-after-cancel.jpg").apply { writeText("image") })
+            runBlocking { withTimeout(5000) { display.state.first { it is ImageLoadState.Success } } }
             assertTrue(display.state.value is ImageLoadState.Success)
         } finally {
             result.cancel()
