@@ -24,7 +24,7 @@ import org.robolectric.util.ReflectionHelpers
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28], application = Application::class)
 class LegacyPageSaveMigrationTest {
-    private val context get() = RuntimeEnvironment.getApplication<Application>()
+    private val context get() = RuntimeEnvironment.getApplication()
     private val gson = Gson()
     private lateinit var database: AppDatabase
     private lateinit var journal: ImagePageSaveJournal

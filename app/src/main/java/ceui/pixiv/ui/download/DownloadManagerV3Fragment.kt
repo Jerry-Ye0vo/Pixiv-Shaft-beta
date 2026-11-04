@@ -403,4 +403,3 @@ private fun List<DownloadItem>.toPauseToggleItems(): List<PauseToggleItem> {
         PauseToggleItem(state, willDispatch)
     }
 }
-

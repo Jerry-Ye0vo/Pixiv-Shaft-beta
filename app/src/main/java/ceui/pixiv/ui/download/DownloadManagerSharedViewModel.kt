@@ -174,4 +174,3 @@ class DownloadManagerSharedViewModel @Inject constructor(
         _selectedTab.value = position
     }
 }
-
