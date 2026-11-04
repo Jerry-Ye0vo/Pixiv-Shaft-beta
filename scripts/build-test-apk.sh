@@ -13,7 +13,7 @@ beta_revision="${SHAFT_BETA_REVISION:-}"
 usage() {
     cat <<'USAGE'
 Usage: bash scripts/build-test-apk.sh [options]
-  --test          Run page-selection and save-recovery tests before packaging
+  --test          Run page-selection and unified-queue recovery tests before packaging
   --install       Install the resulting APK on the single connected adb device
   --abi ABI       arm64-v8a (default) or x86_64 (emulator)
   --output DIR    APK/checksum destination (default: dist/test-apk)
@@ -118,7 +118,8 @@ if $run_tests; then
     bash ./gradlew :app:testGithubDebugUnitTest \
         --tests ceui.pixiv.ui.download.PageDownloadSelectionTest \
         --tests ceui.pixiv.download.ImagePageSaveJournalTest \
-        --tests ceui.pixiv.download.ImagePageSaverRecoveryTest "${gradle_args[@]}"
+        --tests ceui.pixiv.download.LegacyPageSaveMigrationTest \
+        --tests ceui.pixiv.ui.detail.PageDownloadFabStateTest "${gradle_args[@]}"
 fi
 bash ./gradlew :app:assembleGithubDebug "${gradle_args[@]}"
 
@@ -142,3 +143,4 @@ cp "${apks[0]}" "$artifact"
 )
 printf 'APK: %s\n' "$artifact"
 if $install_apk; then "$adb_bin" install -r "$artifact"; fi
+

@@ -1,0 +1,58 @@
+name: Unified download verification
+
+on:
+  push:
+    branches: [feat/unified-downloads]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: unified-downloads-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Run app unit tests
+        run: bash ./gradlew :app:testGithubDebugUnitTest --parallel --build-cache --console=plain
+      - name: Verify Room schema remains unchanged
+        run: |
+          changes="$(git status --porcelain --untracked-files=all -- app/schemas)"
+          if [ -n "$changes" ]; then
+            printf '%s\n' "$changes"
+            exit 1
+          fi
+      - name: Run Android lint
+        run: bash ./gradlew :app:lintGithubDebug --parallel --build-cache --console=plain
+      - name: Verify lint report
+        run: |
+          test -f app/build/reports/lint-results-githubDebug.xml
+          if grep -Eq 'severity="(Error|Fatal)"' app/build/reports/lint-results-githubDebug.xml; then
+            exit 1
+          fi
+      - name: Upload verification reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unified-download-reports-${{ github.sha }}
+          path: |
+            app/build/test-results/
+            app/build/reports/tests/
+            app/build/reports/lint-results*
+          if-no-files-found: warn

@@ -52,7 +52,8 @@ jobs:
           bash ./gradlew :app:testGithubDebugUnitTest \
             --tests ceui.pixiv.ui.download.PageDownloadSelectionTest \
             --tests ceui.pixiv.download.ImagePageSaveJournalTest \
-            --tests ceui.pixiv.download.ImagePageSaverRecoveryTest \
+            --tests ceui.pixiv.download.LegacyPageSaveMigrationTest \
+            --tests ceui.pixiv.ui.detail.PageDownloadFabStateTest \
             --parallel --build-cache --console=plain \
             -PSHAFT_TEST_ABI=arm64-v8a -PSHAFT_BETA_TEST=true \
             "-PSHAFT_BETA_REVISION=$BETA_REVISION"
@@ -133,3 +134,4 @@ jobs:
       - name: Remove temporary signing files
         if: always()
         run: rm -f keystore.properties "$RUNNER_TEMP/beta-keystore.jks" "$RUNNER_TEMP/beta-signing.crt"
+
