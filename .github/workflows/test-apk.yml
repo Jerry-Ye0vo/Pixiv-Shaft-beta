@@ -14,6 +14,8 @@ on:
       - 'app/**'
       - 'scripts/build-test-apk.sh'
       - 'scripts/test-build-test-apk.py'
+      - 'scripts/verify-apk-certificate.py'
+      - 'scripts/test-verify-apk-certificate.py'
       - 'gradle.properties'
       - 'config/beta-signing-cert.sha256'
       - '.github/workflows/test-apk.yml'
@@ -35,7 +37,9 @@ jobs:
         with:
           submodules: recursive
       - name: Test build script and automatic versions
-        run: python3 scripts/test-build-test-apk.py
+        run: |
+          python3 scripts/test-build-test-apk.py
+          python3 scripts/test-verify-apk-certificate.py
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -117,15 +121,14 @@ jobs:
             exit 1
           fi
           tools=("$ANDROID_HOME"/build-tools/*/apksigner)
-          signing_report="$("${tools[${#tools[@]}-1]}" verify --verbose --print-certs "${apk[0]}")"
-          certificate="$(printf '%s\n' "$signing_report" | awk -F': ' '/^Signer #1 certificate SHA-256 digest: / {print tolower($2)}')"
-          expected="$(tr -d '[:space:]' < config/beta-signing-cert.sha256)"
-          echo "APK signing certificate SHA-256: $certificate"
-          if [ "$certificate" != "$expected" ]; then
+          if ! signing_report="$("${tools[${#tools[@]}-1]}" verify --verbose --print-certs "${apk[0]}" 2>&1)"; then
             printf '%s\n' "$signing_report"
-            echo "::error::APK signing certificate mismatch: expected $expected; got $certificate"
+            echo "::error::apksigner could not verify the APK signature"
             exit 1
           fi
+          printf '%s\n' "$signing_report"
+          certificate="$(printf '%s\n' "$signing_report" | python3 scripts/verify-apk-certificate.py config/beta-signing-cert.sha256)"
+          echo "APK signing certificate SHA-256: $certificate"
           {
             echo "applicationId=$package_id"
             echo "versionName=$version_name"
