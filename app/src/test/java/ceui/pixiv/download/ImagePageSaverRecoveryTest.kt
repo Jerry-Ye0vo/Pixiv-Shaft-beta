@@ -6,14 +6,22 @@ import androidx.room.Room
 import ceui.lisa.activities.Shaft
 import ceui.lisa.database.AppDatabase
 import ceui.lisa.database.DownloadEntity
+import ceui.lisa.utils.Settings
 import ceui.pixiv.api.model.Illust
+import ceui.pixiv.imageloader.ImageFetcher
+import ceui.pixiv.imageloader.ImageLoadState
+import ceui.pixiv.imageloader.ImageLoadTask
+import ceui.pixiv.imageloader.ImageRequest
+import ceui.pixiv.imageloader.ImageTaskRegistry
 import com.google.gson.Gson
 import com.hjq.toast.Toaster
 import java.io.File
+import java.io.Closeable
 import java.util.ArrayDeque
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
@@ -50,8 +58,10 @@ class ImagePageSaverRecoveryTest {
 
     @Before fun setUp() {
         Dispatchers.setMain(main)
-        Shaft.sGson = Gson()
         ReflectionHelpers.setStaticField(Shaft::class.java, "sContext", app)
+        Shaft.sGson = Gson()
+        Shaft.sSettings = Settings()
+        ImageSaveCacheGuard.resetForTests()
         Toaster.init(app)
         journal.write(emptyList())
     }
@@ -59,6 +69,7 @@ class ImagePageSaverRecoveryTest {
     @After fun tearDown() {
         scope.cancel()
         io.drain()
+        ImageSaveCacheGuard.resetForTests()
         Dispatchers.resetMain()
     }
 
@@ -138,6 +149,50 @@ class ImagePageSaverRecoveryTest {
         }
     }
 
+    @Test fun `save retains its source while waiting and cancellation releases it without stopping display`() {
+        val db = Room.inMemoryDatabaseBuilder(app, AppDatabase::class.java).allowMainThreadQueries().build()
+        ReflectionHelpers.setStaticField(AppDatabase::class.java, "INSTANCE", db)
+        val result = CompletableDeferred<File>()
+        var acquired = 0
+        var released = 0
+        ImageSaveCacheGuard.install {
+            assertEquals(url, it)
+            acquired++
+            Closeable { released++ }
+        }
+        val display = ImageLoadTask(ImageRequest(url), scope, object : ImageFetcher {
+            override suspend fun fetch(url: String, onProgress: (Int) -> Unit): File {
+                onProgress(37)
+                return result.await()
+            }
+        }, { 0L })
+        try {
+            display.start()
+            val taskMap = ReflectionHelpers.getField<MutableMap<String, ImageLoadTask>>(ImageTaskRegistry, "taskMap")
+            taskMap[url] = display
+            val saver = saver()
+            assertTrue(saver.save(illust, 3, ImagePageSaver.Target.Original(url)))
+            io.drain()
+            assertEquals(1, acquired)
+            assertEquals(0, released)
+            assertTrue(saver.states.value[key] is ImagePageSaver.PageState.Saving)
+            assertTrue(saver.cancel(key))
+            io.drain()
+            assertEquals(1, released)
+            assertTrue(saver.states.value.isEmpty())
+            assertTrue(journal.read().isEmpty())
+            assertEquals(ImageLoadState.Loading(37), display.state.value)
+            result.complete(File(app.cacheDir, "display-after-cancel.jpg").apply { writeText("image") })
+            assertTrue(display.state.value is ImageLoadState.Success)
+        } finally {
+            result.cancel()
+            ImageTaskRegistry.remove(url)
+            ImageSaveCacheGuard.resetForTests()
+            AppDatabase.destroyInstance()
+            db.close()
+        }
+    }
+
     /** Deterministic IO boundaries; no sleeps and no real image/network requests. */
     private class GateDispatcher : CoroutineDispatcher() {
         private val work = ArrayDeque<Runnable>()
@@ -152,3 +207,4 @@ class ImagePageSaverRecoveryTest {
         }
     }
 }
+

@@ -392,99 +392,104 @@ class ImagePageSaver internal constructor(
      */
     private suspend fun saveOriginal(key: PageKey, illust: Illust, page: Int, imageUrl: String): Boolean =
         withContext(ioDispatcher) {
-            IllustCaptionExporter.export(illust)
-            var resolveError: Throwable? = null
-            val file =
-                try {
-                    PageImageSourceResolver.resolve(app, illust, page, imageUrl)
-                        .awaitFile(app) { publishProgress(key, it) }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    Timber.w(e, "[ImagePageSaver] await loaded file failed page=%d", page)
-                    resolveError = e
-                    null
-                }
-            if (file == null) {
-                withContext(Dispatchers.Main) { toastFailure(key, resolveError) }
-                return@withContext false
-            }
-            publishProgress(key, 100)
-            publishPhase(key, Phase.WAITING_TO_WRITE)
-
-            // 批量下载正在写同一张图时先等它收尾(#1312):两边写的是同一个模板目标,替换策略下同时写会
-            // 多出 " (1)" 副本,或一方补写完标签后被另一方剩下的字节改坏。借 Manager 的同 url 单主锁。
-            // 我们占着的那一小段写盘窗口里 Manager 刚好开传这张图,会按「stage key busy」把那一页判失败:
-            // 批量队列会自动重试,详情页「下载全部」直接进 Manager 的不会,停在失败等用户点重试
-            // (文件本身这边已经写好并记了账)。要在下面落副本之前拿到:本地来源可能正是队列在写的那个目标文件。
-            val manager = Manager.get()
-            while (!manager.tryAcquireUrlWrite(imageUrl)) delay(URL_WRITE_POLL_MS)
+            val retained = ImageSaveCacheGuard.retain(imageUrl)
             try {
-                claimWrite(key)
-                // 这一页已下载时,本地来源可能正是这次要写的目标本身(同模板同路径)。替换策略下后端会先删 /
-                // 截断目标再写,边读边写就把用户的原图抹成 0 字节。私有目录之外的来源先落一份副本再写。
-                val staged =
-                    if (file.isInsideAppPrivateDir()) null
-                    else runCatching {
-                        File.createTempFile("save_src", null, app.cacheDir).also { file.copyTo(it, overwrite = true) }
-                    }.getOrElse {
-                        if (it is CancellationException) throw it
-                        Timber.w(it, "[ImagePageSaver] stage local source failed page=%d", page)
-                        withContext(Dispatchers.Main) { toastFailure(key, it) }
-                        return@withContext false
-                    }
-                val source = staged ?: file
-
-                runCatching {
-                    // open() 返回 null = Skip 策略且文件已存在 → 视为已保存,无需重写。
-                    val handle =
-                        DownloadsRegistry.downloads.open(DownloadItems.illustPage(illust, page))
-                            ?: return@runCatching true
+                IllustCaptionExporter.export(illust)
+                var resolveError: Throwable? = null
+                val file =
                     try {
-                        handle.stream.use { out -> FileInputStream(source).use { it.copyTo(out) } }
-                        handle.onFinish()
-                    } catch (t: Throwable) {
-                        handle.onAbort()
-                        throw t
+                        PageImageSourceResolver.resolve(app, illust, page, imageUrl)
+                            .awaitFile(app) { publishProgress(key, it) }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Timber.w(e, "[ImagePageSaver] await loaded file failed page=%d", page)
+                        resolveError = e
+                        null
                     }
-                    // 可选:标签写进 JPEG XMP 关键词(issue #938)。放在 commit 之后、onAbort 作用域之外,
-                    // 免得写元数据抛错误删掉已成功的文件。整段再包一层 runCatching:即便标签取值意外抛错,
-                    // 也不能连累下面「已下载」写库(否则文件在盘上却不记账)。开关默认关时直接跳过,零开销。
-                    if (Shaft.sSettings.isWriteTagsToImageExif()) {
-                        runCatching {
-                            ExifKeywordWriter.writeIfEnabled(
-                                app,
-                                handle.uri,
-                                FileCreator.customFileName(illust, page),
-                                illust.tags.orEmpty().mapNotNull { it?.name },
-                            )
-                        }
-                    }
-                    // 与 Manager 成功分支一致地写库(fileName 用 FileCreator=模板命名,filePath 用写盘 uri)。
-                    val entity =
-                        DownloadEntity().apply {
-                            illustGson = DownloadRecordSlim.createIllustJson(illust)
-                            fileName = FileCreator.customFileName(illust, page)
-                            downloadTime = System.currentTimeMillis()
-                            filePath = handle.uri.toString()
-                            // v41 的 page 列 —— 与 Manager 成功分支一致，让按 (illustId, page) 的
-                            // 查询也能命中「保存这一张」写下的记录。
-                            this.page = page
-                        }
-                    // insertDownload 会从 illustGson 顶层 id 补上 illustId（走 v38 索引）。
-                    AppDatabase.getAppDatabase(app).downloadDao().insertDownload(entity)
-                    ManagerReactive.pokeDoneTable()
-                    true
+                if (file == null) {
+                    withContext(Dispatchers.Main) { toastFailure(key, resolveError) }
+                    return@withContext false
                 }
-                    .getOrElse { ex ->
-                        if (ex is CancellationException) throw ex
-                        Timber.e(ex, "[ImagePageSaver] saveOriginal failed page=%d", page)
-                        withContext(Dispatchers.Main) { toastFailure(key, ex) }
-                        false
+                publishProgress(key, 100)
+                publishPhase(key, Phase.WAITING_TO_WRITE)
+
+                // 批量下载正在写同一张图时先等它收尾(#1312):两边写的是同一个模板目标,替换策略下同时写会
+                // 多出 " (1)" 副本,或一方补写完标签后被另一方剩下的字节改坏。借 Manager 的同 url 单主锁。
+                // 我们占着的那一小段写盘窗口里 Manager 刚好开传这张图,会按「stage key busy」把那一页判失败:
+                // 批量队列会自动重试,详情页「下载全部」直接进 Manager 的不会,停在失败等用户点重试
+                // (文件本身这边已经写好并记了账)。要在下面落副本之前拿到:本地来源可能正是队列在写的那个目标文件。
+                val manager = Manager.get()
+                while (!manager.tryAcquireUrlWrite(imageUrl)) delay(URL_WRITE_POLL_MS)
+                try {
+                    claimWrite(key)
+                    // 这一页已下载时,本地来源可能正是这次要写的目标本身(同模板同路径)。替换策略下后端会先删 /
+                    // 截断目标再写,边读边写就把用户的原图抹成 0 字节。私有目录之外的来源先落一份副本再写。
+                    val staged =
+                        if (file.isInsideAppPrivateDir()) null
+                        else runCatching {
+                            File.createTempFile("save_src", null, app.cacheDir).also { file.copyTo(it, overwrite = true) }
+                        }.getOrElse {
+                            if (it is CancellationException) throw it
+                            Timber.w(it, "[ImagePageSaver] stage local source failed page=%d", page)
+                            withContext(Dispatchers.Main) { toastFailure(key, it) }
+                            return@withContext false
+                        }
+                    val source = staged ?: file
+
+                    runCatching {
+                        // open() 返回 null = Skip 策略且文件已存在 → 视为已保存,无需重写。
+                        val handle =
+                            DownloadsRegistry.downloads.open(DownloadItems.illustPage(illust, page))
+                                ?: return@runCatching true
+                        try {
+                            handle.stream.use { out -> FileInputStream(source).use { it.copyTo(out) } }
+                            handle.onFinish()
+                        } catch (t: Throwable) {
+                            handle.onAbort()
+                            throw t
+                        }
+                        // 可选:标签写进 JPEG XMP 关键词(issue #938)。放在 commit 之后、onAbort 作用域之外,
+                        // 免得写元数据抛错误删掉已成功的文件。整段再包一层 runCatching:即便标签取值意外抛错,
+                        // 也不能连累下面「已下载」写库(否则文件在盘上却不记账)。开关默认关时直接跳过,零开销。
+                        if (Shaft.sSettings.isWriteTagsToImageExif()) {
+                            runCatching {
+                                ExifKeywordWriter.writeIfEnabled(
+                                    app,
+                                    handle.uri,
+                                    FileCreator.customFileName(illust, page),
+                                    illust.tags.orEmpty().mapNotNull { it?.name },
+                                )
+                            }
+                        }
+                        // 与 Manager 成功分支一致地写库(fileName 用 FileCreator=模板命名,filePath 用写盘 uri)。
+                        val entity =
+                            DownloadEntity().apply {
+                                illustGson = DownloadRecordSlim.createIllustJson(illust)
+                                fileName = FileCreator.customFileName(illust, page)
+                                downloadTime = System.currentTimeMillis()
+                                filePath = handle.uri.toString()
+                                // v41 的 page 列 —— 与 Manager 成功分支一致，让按 (illustId, page) 的
+                                // 查询也能命中「保存这一张」写下的记录。
+                                this.page = page
+                            }
+                        // insertDownload 会从 illustGson 顶层 id 补上 illustId（走 v38 索引）。
+                        AppDatabase.getAppDatabase(app).downloadDao().insertDownload(entity)
+                        ManagerReactive.pokeDoneTable()
+                        true
                     }
-                    .also { staged?.delete() }
+                        .getOrElse { ex ->
+                            if (ex is CancellationException) throw ex
+                            Timber.e(ex, "[ImagePageSaver] saveOriginal failed page=%d", page)
+                            withContext(Dispatchers.Main) { toastFailure(key, ex) }
+                            false
+                        }
+                        .also { staged?.delete() }
+                } finally {
+                    manager.releaseUrlWrite(imageUrl)
+                }
             } finally {
-                manager.releaseUrlWrite(imageUrl)
+                retained.close()
             }
         }
 
@@ -504,3 +509,4 @@ class ImagePageSaver internal constructor(
         const val URL_WRITE_POLL_MS = 250L
     }
 }
+
