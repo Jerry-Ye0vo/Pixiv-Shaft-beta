@@ -28,6 +28,7 @@ class ResumableOkHttpFetcher(
     private val contextProvider: () -> Context = { Shaft.getContext() },
     private val cacheDirProvider: () -> File = { OriginalImageCacheManager.getCacheDir(contextProvider()) },
     private val stagingDirProvider: () -> File = { OriginalImageCacheManager.getStagingDir(contextProvider()) },
+    private val onCommitted: () -> Unit = { OriginalImageCacheManager.trimAsync(contextProvider()) },
 ) : ImageFetcher {
 
     companion object : ImageFetcher {
@@ -37,9 +38,12 @@ class ResumableOkHttpFetcher(
             defaultInstance.fetch(url, onProgress)
     }
 
-    override suspend fun fetch(url: String, onProgress: (Int) -> Unit): File {
-        val context = contextProvider()
-        val cached = OriginalImageCacheManager.find(context, url)
+    override suspend fun fetch(url: String, onProgress: (Int) -> Unit): File =
+        OriginalImageCacheManager.retain(url).use { fetchRetained(url, onProgress) }
+
+    private suspend fun fetchRetained(url: String, onProgress: (Int) -> Unit): File {
+        val cacheDir = cacheDirProvider()
+        val cached = OriginalImageCacheManager.findIn(cacheDir, url)
         if (cached != null) {
             Timber.d("[ResumableFetcher] cache hit url=${url.substringAfterLast('/')}")
             return cached
@@ -114,7 +118,7 @@ class ResumableOkHttpFetcher(
 
                     StageStore.WriteMode.ALREADY_COMPLETE -> {
                         response.close()
-                        OriginalImageCacheManager.commit(context, url, partFile)
+                        commit(cacheDir, stagingDir, url, partFile)
                     }
 
                     StageStore.WriteMode.FRESH, StageStore.WriteMode.APPEND -> {
@@ -172,7 +176,7 @@ class ResumableOkHttpFetcher(
                             }
                         }
 
-                        OriginalImageCacheManager.commit(context, url, partFile)
+                        commit(cacheDir, stagingDir, url, partFile)
                     }
                 }
             } catch (ce: CancellationException) {
@@ -183,4 +187,8 @@ class ResumableOkHttpFetcher(
             }
         }
     }
+
+    private fun commit(cacheDir: File, stagingDir: File, url: String, partFile: File): File =
+        OriginalImageCacheManager.commitIn(cacheDir, stagingDir, url, partFile).also { onCommitted() }
 }
+

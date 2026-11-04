@@ -6,8 +6,10 @@ import ceui.lisa.utils.GlideUrlChild
 import com.bumptech.glide.Glide
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
+import timber.log.Timber
 import java.io.File
 import java.util.function.IntConsumer
 
@@ -98,19 +100,20 @@ object ImageLoaderV3 {
             ImageLoadState.Idle, is ImageLoadState.Error -> return null
             else -> Unit
         }
-        val file = task.currentFile
-        if (file != null) return file
+        return awaitExistingFile(task, onProgress)
+    }
 
-        return kotlinx.coroutines.runBlocking {
-            try {
-                task.awaitFile { onProgress.accept(it) }
-            } catch (ie: InterruptedException) {
-                throw ie
-            } catch (ce: CancellationException) {
-                throw InterruptedException("download interrupted").apply { initCause(ce) }
-            } catch (e: Exception) {
-                null
-            }
+    internal fun awaitExistingFile(task: ImageLoadTask, onProgress: IntConsumer): File {
+        try {
+            return runBlocking { task.awaitFile { onProgress.accept(it) } }
+        } catch (cancelled: InterruptedException) {
+            throw cancelled
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            Timber.tag("SharedImageDownload").w(error, "WAIT_FAILED image=%s", task.request.name)
+            throw error
         }
     }
 }
+

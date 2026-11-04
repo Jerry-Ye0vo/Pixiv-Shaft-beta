@@ -259,21 +259,22 @@ object StageStore {
     /**
      * 扫 [stageDir]，删掉「最后修改时间早于 [now] - [maxAgeMs]」的 `.part` / `.part.meta`。
      *
-     * 正在下载的 `.part` 会被高频 write 顶新 lastModified，只有真正被遗弃的
-     * （永久失败 / 用户清空队列 / 崩溃残留）才会老到被扫走。因此纯按年龄回收就安全，
-     * 不必把「哪些 key 还活着」这份信息传进来（那需要把队列里每条 illust 解析成 URL，
-     * 代价大且易错）。冷启动跑一次即可。
+     * 正在下载的 `.part` 会被 write 刷新 lastModified。普通调用按年龄回收；
+     * 恢复旧分片时可传 [protectedKeys]，避免任务刚启动、尚未刷新时间戳之前
+     * 被冷启动清扫删除。无需解析下载队列。
      *
      * @return 删除的文件个数（.part 和 .meta 分别计）。
      */
     @JvmStatic
-    fun sweepOrphans(stageDir: File, maxAgeMs: Long, now: Long): Int {
+    @JvmOverloads
+    fun sweepOrphans(stageDir: File, maxAgeMs: Long, now: Long, protectedKeys: Set<String> = emptySet()): Int {
         if (!stageDir.isDirectory) return 0
         val files = stageDir.listFiles() ?: return 0
         var deleted = 0
         for (f in files) {
             if (!f.isFile) continue
             val name = f.name
+            if (name.substringBefore('.') in protectedKeys) continue
             if (!name.endsWith(PART_SUFFIX) && !name.endsWith(META_SUFFIX)) continue
             if (now - f.lastModified() < maxAgeMs) continue
             if (f.delete()) deleted++
@@ -281,3 +282,4 @@ object StageStore {
         return deleted
     }
 }
+

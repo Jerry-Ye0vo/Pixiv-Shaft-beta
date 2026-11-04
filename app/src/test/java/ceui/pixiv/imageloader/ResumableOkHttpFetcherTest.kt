@@ -57,6 +57,7 @@ class ResumableOkHttpFetcherTest {
         contextProvider = { error("Context not expected in unit test") },
         cacheDirProvider = { cacheDir },
         stagingDirProvider = { stagingDir },
+        onCommitted = {},
     )
 
     private fun testUrl(): String = server.url("/img-original/img/2026/01/01/00/00/00/12345_p0.jpg").toString()
@@ -82,6 +83,8 @@ class ResumableOkHttpFetcherTest {
         assertArrayEquals(payload, file.readBytes())
         assertTrue(progressList.isNotEmpty())
         assertEquals(emptyList<File>(), stagingDir.listFiles()?.toList() ?: emptyList<File>())
+        assertEquals(file, fetcher.fetch(testUrl()) {})
+        assertEquals(1, server.requestCount)
     }
 
     @Test
@@ -139,7 +142,7 @@ class ResumableOkHttpFetcherTest {
         }
 
         val fetcher = testFetcher()
-        val file = fetcher.fetch(url)
+        val file = fetcher.fetch(url) {}
 
         assertTrue(file.exists())
         assertEquals(1000L, file.length())
@@ -167,7 +170,7 @@ class ResumableOkHttpFetcherTest {
         }
 
         val fetcher = testFetcher()
-        val file = fetcher.fetch(url)
+        val file = fetcher.fetch(url) {}
 
         assertTrue(file.exists())
         assertEquals(1000L, file.length())
@@ -194,7 +197,7 @@ class ResumableOkHttpFetcherTest {
         val fetcher = testFetcher()
         var failed = false
         try {
-            fetcher.fetch(url)
+            fetcher.fetch(url) {}
         } catch (e: IOException) {
             failed = true
         }
@@ -204,3 +207,4 @@ class ResumableOkHttpFetcherTest {
         assertTrue(partFile.length() in 1..400)
     }
 }
+

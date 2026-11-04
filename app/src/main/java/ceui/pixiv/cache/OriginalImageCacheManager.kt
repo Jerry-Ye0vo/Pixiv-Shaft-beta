@@ -10,6 +10,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import timber.log.Timber
 import java.io.File
+import java.io.Closeable
 import java.io.IOException
 
 /**
@@ -18,6 +19,27 @@ import java.io.IOException
 object OriginalImageCacheManager {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val cacheLock = Any()
+    private val retained = HashMap<String, Int>()
+
+    /** Acquire before loading: quota eviction must not remove a source awaiting a save write. */
+    @JvmStatic
+    fun retain(url: String): Closeable {
+        val key = keyForUrl(url)
+        synchronized(cacheLock) { retained[key] = (retained[key] ?: 0) + 1 }
+        var released = false
+        return Closeable {
+            synchronized(cacheLock) {
+                if (!released) {
+                    released = true
+                    val remaining = (retained[key] ?: 1) - 1
+                    if (remaining == 0) retained.remove(key) else retained[key] = remaining
+                }
+            }
+        }
+    }
+
+    private fun isRetained(file: File): Boolean = file.name.substringBefore('.') in retained
 
     @JvmStatic
     fun getCacheDir(context: Context): File = LegacyFile.originalImageCacheFolder(context)
@@ -32,30 +54,31 @@ object OriginalImageCacheManager {
      * 查询指定原图 URL 是否已缓存在本地。若命中则更新访问时间（LRU）并返回文件。
      */
     @JvmStatic
-    fun find(context: Context, url: String): File? {
+    fun find(context: Context, url: String): File? = findIn(getCacheDir(context), url)
+
+    internal fun findIn(cacheDir: File, url: String): File? = synchronized(cacheLock) {
         val key = keyForUrl(url)
-        val cacheDir = getCacheDir(context)
         val ext = fileExtensionForUrl(url)
         val directFile = File(cacheDir, "$key.$ext")
         if (directFile.isFile && directFile.length() > 0) {
             directFile.setLastModified(System.currentTimeMillis())
-            return directFile
+            return@synchronized directFile
         }
 
         val datFile = File(cacheDir, "$key.dat")
         if (datFile.isFile && datFile.length() > 0) {
             datFile.setLastModified(System.currentTimeMillis())
-            return datFile
+            return@synchronized datFile
         }
 
         val matched = cacheDir.listFiles { _, name -> name.startsWith(key) }
             ?.firstOrNull { it.isFile && it.length() > 0 }
         if (matched != null) {
             matched.setLastModified(System.currentTimeMillis())
-            return matched
+            return@synchronized matched
         }
 
-        return null
+        null
     }
 
     /**
@@ -64,30 +87,33 @@ object OriginalImageCacheManager {
     @JvmStatic
     @Throws(IOException::class)
     fun commit(context: Context, url: String, partFile: File): File {
-        val key = keyForUrl(url)
-        val cacheDir = getCacheDir(context)
-        val ext = fileExtensionForUrl(url)
-        val targetFile = File(cacheDir, "$key.$ext")
-
-        if (targetFile.exists()) {
-            targetFile.delete()
-        }
-
-        val renamed = partFile.renameTo(targetFile)
-        if (!renamed) {
-            partFile.copyTo(targetFile, overwrite = true)
-            partFile.delete()
-        }
-
-        targetFile.setLastModified(System.currentTimeMillis())
-
-        val stagingDir = getStagingDir(context)
-        StageStore.clear(stagingDir, key)
-
+        val file = commitIn(getCacheDir(context), getStagingDir(context), url, partFile)
         trimAsync(context)
-
-        return targetFile
+        return file
     }
+
+    internal fun commitIn(cacheDir: File, stagingDir: File, url: String, partFile: File): File =
+        synchronized(cacheLock) {
+            val key = keyForUrl(url)
+            if (!cacheDir.isDirectory && !cacheDir.mkdirs()) throw IOException("Cannot create original cache")
+            val ext = fileExtensionForUrl(url)
+            val targetFile = File(cacheDir, "$key.$ext")
+
+            if (targetFile.exists()) {
+                targetFile.delete()
+            }
+
+            val renamed = partFile.renameTo(targetFile)
+            if (!renamed) {
+                partFile.copyTo(targetFile, overwrite = true)
+                partFile.delete()
+            }
+
+            targetFile.setLastModified(System.currentTimeMillis())
+
+            StageStore.clear(stagingDir, key)
+            targetFile
+        }
 
     /**
      * 同步按当前配额执行 LRU 淘汰。
@@ -96,17 +122,18 @@ object OriginalImageCacheManager {
     fun trimToQuota(
         context: Context,
         maxMb: Int = Shaft.sSettings?.originalImageCacheMaxMb ?: OriginalImageCacheQuota.DEFAULT_LIMIT_MB,
-    ) {
-        val maxBytes = OriginalImageCacheQuota.maxBytesForLimit(maxMb)
-        val cacheDir = getCacheDir(context)
-        val files = cacheDir.listFiles()?.filter { it.isFile } ?: return
+    ) = trimDirectory(getCacheDir(context), OriginalImageCacheQuota.maxBytesForLimit(maxMb))
+
+    internal fun trimDirectory(cacheDir: File, maxBytes: Long) = synchronized(cacheLock) {
+        val files = cacheDir.listFiles()?.filter { it.isFile } ?: return@synchronized
 
         var totalSize = files.sumOf { it.length() }
-        if (totalSize <= maxBytes) return
+        if (totalSize <= maxBytes) return@synchronized
 
         val sorted = files.sortedBy { it.lastModified() }
         var evictedCount = 0
         for (file in sorted) {
+            if (isRetained(file)) continue
             val length = file.length()
             if (file.delete()) {
                 totalSize -= length
@@ -142,12 +169,17 @@ object OriginalImageCacheManager {
     @JvmStatic
     fun sweepOrphans(context: Context, maxAgeMs: Long = 48 * 3600 * 1000L): Int {
         val stagingDir = getStagingDir(context)
-        val swept = StageStore.sweepOrphans(stagingDir, maxAgeMs, System.currentTimeMillis())
+        val swept = sweepDirectory(stagingDir, maxAgeMs, System.currentTimeMillis())
         if (swept > 0) {
             Timber.d("[OriginalCache] swept $swept orphaned staging files")
         }
         return swept
     }
+
+    internal fun sweepDirectory(stagingDir: File, maxAgeMs: Long, now: Long): Int =
+        synchronized(cacheLock) {
+            StageStore.sweepOrphans(stagingDir, maxAgeMs, now, retained.keys)
+        }
 
     /**
      * 冷启动后台任务：清理孤儿临时分片并按配额清理超出大小的原图缓存。
@@ -172,8 +204,10 @@ object OriginalImageCacheManager {
     fun clearAll(context: Context) {
         val cacheDir = getCacheDir(context)
         val stagingDir = getStagingDir(context)
-        cacheDir.listFiles()?.forEach { runCatching { it.delete() } }
-        stagingDir.listFiles()?.forEach { runCatching { it.delete() } }
+        synchronized(cacheLock) {
+            cacheDir.listFiles()?.filterNot(::isRetained)?.forEach { runCatching { it.delete() } }
+            stagingDir.listFiles()?.filterNot(::isRetained)?.forEach { runCatching { it.delete() } }
+        }
         Timber.d("[OriginalCache] clearAll finished")
     }
 
@@ -192,3 +226,4 @@ object OriginalImageCacheManager {
         return if (ext.isNotEmpty() && ext.length in 2..5) ext else "dat"
     }
 }
+
