@@ -16,5 +16,11 @@ internal fun resolvePageDownloadFabState(
     val current = items.filter { it.illust.id == illustId && it.index == page }
     // An empty live queue does not prove the page was saved: the caller probes the done table.
     if (current.isEmpty()) return null
-    return resolveDownloadFabState(current, 1, isWifiConnected, downloadLimitType, dispatchScheduled)
+    val state = resolveDownloadFabState(current, 1, isWifiConnected, downloadLimitType, dispatchScheduled)
+    // Cold restoration can leave INIT items with the pump closed, even on Wi-Fi.
+    // Offer a real resume action instead of showing an indefinitely spinning download button.
+    return if (state is DownloadFab.Downloading && !dispatchScheduled &&
+        current.none { it.state == DownloadItem.DownloadState.DOWNLOADING }) {
+        DownloadFab.Resume(state.percent)
+    } else state
 }

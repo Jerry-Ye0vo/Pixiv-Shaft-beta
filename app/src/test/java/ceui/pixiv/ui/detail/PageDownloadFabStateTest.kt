@@ -48,4 +48,9 @@ class PageDownloadFabStateTest {
     @Test fun `empty queue requires a file probe and does not imply completed artwork`() {
         assertNull(resolve(emptyList()))
     }
+
+    @Test fun `restored unscheduled page offers resume on WiFi without starting other pages`() {
+        assertEquals(DownloadFab.Resume(0), resolve(listOf(item()), wifi = true, limit = 0))
+        assertEquals(DownloadFab.Downloading(0), resolve(listOf(item()), wifi = true, limit = 0, scheduled = true))
+    }
 }
