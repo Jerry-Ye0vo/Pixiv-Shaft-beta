@@ -1,0 +1,23 @@
+name: Archive Beta 14
+on:
+  push:
+    branches: [classic]
+    paths: ['.github/workflows/archive-beta14.yml', 'scripts/archive-beta14.py']
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: archive-beta14
+  cancel-in-progress: false
+jobs:
+  archive:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify and publish existing Beta APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: python3 scripts/archive-beta14.py
