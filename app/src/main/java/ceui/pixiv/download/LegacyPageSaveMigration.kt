@@ -40,9 +40,20 @@ object LegacyPageSaveMigration {
                 // Keep an existing live task and its uuid. A retry after a crash is idempotent,
                 // including when the user changed naming templates between launches.
                 val exists = database.openHelper.writableDatabase.query(
-                    "SELECT 1 FROM illust_downloading_table WHERE fileName = ? OR uuid = ? LIMIT 1",
+                    "SELECT taskGson FROM illust_downloading_table WHERE fileName = ? OR uuid = ?",
                     arrayOf(item.name, item.uuid),
-                ).use { it.moveToFirst() }
+                ).use { cursor ->
+                    var matched = false
+                    while (cursor.moveToNext()) {
+                        val existing = requireNotNull(gson.fromJson(cursor.getString(0), DownloadItem::class.java))
+                        check(existing.illust?.id == item.illust.id && existing.index == item.index &&
+                            existing.url == item.url) {
+                            "Pending download identity conflict: ${item.name}"
+                        }
+                        matched = true
+                    }
+                    matched
+                }
                 if (!exists) {
                     database.downloadDao().insertDownloading(DownloadingEntity().apply {
                         fileName = item.name

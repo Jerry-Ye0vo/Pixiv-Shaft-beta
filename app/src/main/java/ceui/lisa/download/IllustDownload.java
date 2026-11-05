@@ -101,9 +101,8 @@ public class IllustDownload {
             if (illust.getPage_count() == 1) {
                 IllustCaptionExporter.export(illust);
                 DownloadItem item = buildDownloadItem(illust, 0, imageResolution);
-                DownloadToasts.show(DownloadToastKind.ENQUEUED,
-                        '1' + Shaft.getContext().getString(R.string.has_been_added));
-                Manager.get().addTask(item);
+                Manager.get().addTask(item, () -> DownloadToasts.show(DownloadToastKind.ENQUEUED,
+                        '1' + Shaft.getContext().getString(R.string.has_been_added)));
                 trackDownload(illust, 1);
             }
         });
@@ -122,9 +121,8 @@ public class IllustDownload {
         if (illust.getPage_count() == 1) {
             IllustCaptionExporter.export(illust);
             DownloadItem item = buildDownloadItem(illust, 0, imageResolution);
-            DownloadToasts.show(DownloadToastKind.ENQUEUED,
-                    '1' + Shaft.getContext().getString(R.string.has_been_added));
-            Manager.get().addTask(item);
+            Manager.get().addTask(item, () -> DownloadToasts.show(DownloadToastKind.ENQUEUED,
+                    '1' + Shaft.getContext().getString(R.string.has_been_added)));
             trackDownload(illust, 1);
         }
     }
@@ -137,9 +135,8 @@ public class IllustDownload {
             } else {
                 IllustCaptionExporter.export(illust);
                 DownloadItem item = buildDownloadItem(illust, index);
-                DownloadToasts.show(DownloadToastKind.ENQUEUED,
-                        '1' + Shaft.getContext().getString(R.string.has_been_added));
-                Manager.get().addTask(item);
+                Manager.get().addTask(item, () -> DownloadToasts.show(DownloadToastKind.ENQUEUED,
+                        '1' + Shaft.getContext().getString(R.string.has_been_added)));
                 trackDownload(illust, 1);
             }
         });
@@ -184,10 +181,10 @@ public class IllustDownload {
             return;
         }
         IllustCaptionExporter.export(illust);
-        Manager.get().addTasks(items); // Atomic URL dedup also covers a concurrent whole-work enqueue.
+        Manager.get().addTasks(items, () -> DownloadToasts.show(DownloadToastKind.ENQUEUED,
+                Shaft.getContext().getString(R.string.page_download_submitted,
+                        items.size(), unique.size() - items.size())));
         trackDownload(illust, items.size());
-        DownloadToasts.show(DownloadToastKind.ENQUEUED, Shaft.getContext().getString(
-                R.string.page_download_submitted, items.size(), unique.size() - items.size()));
     }
 
     /**
@@ -243,9 +240,8 @@ public class IllustDownload {
                 DownloadItem item = buildDownloadItem(illust, i, imageResolution);
                 tempList.add(item);
             }
-            DownloadToasts.show(DownloadToastKind.ENQUEUED,
-                    tempList.size() + Shaft.getContext().getString(R.string.has_been_added));
-            Manager.get().addTasks(tempList);
+            Manager.get().addTasks(tempList, () -> DownloadToasts.show(DownloadToastKind.ENQUEUED,
+                    tempList.size() + Shaft.getContext().getString(R.string.has_been_added)));
             trackDownload(illust, tempList.size());
         }
     }
@@ -555,3 +551,4 @@ public class IllustDownload {
         }
     }
 }
+

@@ -109,6 +109,37 @@ class LegacyPageSaveMigrationTest {
         assertEquals(2, LegacyPageSaveMigration.migrate(context, database, gson))
     }
 
+    @Test fun `same filename with a different resource preserves the existing row and the journal`() {
+        journal.write(listOf(entry(3)))
+        LegacyPageSaveMigration.migrate(context, database, gson)
+        val original = database.downloadDao().getDownloadingByFileName(rows().single().name)
+        val changed = original.taskGson.replace("12345_p3.png", "different-resource.png")
+        original.taskGson = changed
+        database.downloadDao().insertDownloading(original)
+        journal.write(listOf(entry(3)))
+        try {
+            LegacyPageSaveMigration.migrate(context, database, gson)
+            fail("A filename collision is not a duplicate intention")
+        } catch (_: IllegalStateException) { }
+        assertEquals(changed, database.downloadDao().getDownloadingByFileName(original.fileName).taskGson)
+        assertEquals(1, journal.read().size)
+    }
+
+    @Test fun `unreadable conflicting pending record does not acknowledge the source journal`() {
+        journal.write(listOf(entry(3)))
+        LegacyPageSaveMigration.migrate(context, database, gson)
+        val original = database.downloadDao().getDownloadingByFileName(rows().single().name)
+        original.taskGson = "{broken"
+        database.downloadDao().insertDownloading(original)
+        journal.write(listOf(entry(3)))
+        try {
+            LegacyPageSaveMigration.migrate(context, database, gson)
+            fail("Unreadable pending identity must remain recoverable")
+        } catch (_: com.google.gson.JsonParseException) { }
+        assertEquals("{broken", database.downloadDao().getDownloadingByFileName(original.fileName).taskGson)
+        assertEquals(1, journal.read().size)
+    }
+
     @Test fun `invalid artwork page leaves journal unchanged`() {
         journal.write(listOf(entry(3), entry(20)))
         try {
@@ -137,3 +168,4 @@ class LegacyPageSaveMigrationTest {
         assertEquals(3, rows().single().index)
     }
 }
+

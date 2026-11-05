@@ -27,6 +27,14 @@ jobs:
           bash ./gradlew :app:testGithubDebugUnitTest --console=plain --build-cache \
             -PSHAFT_TEST_ABI=arm64-v8a -PSHAFT_BETA_TEST=true \
             --tests ceui.pixiv.download.queue.ContentQueueStoreTest \
+            --tests ceui.lisa.core.ManagerAdmissionTest \
+            --tests ceui.lisa.core.PageQueueCompatibilityTest \
+            --tests ceui.pixiv.download.LegacyPageSaveMigrationTest \
+            --tests ceui.pixiv.download.DownloadRecordStateSourceTest \
+            --tests ceui.pixiv.download.DownloadedPageIndexTest \
+            --tests ceui.pixiv.db.queue.DownloadQueueDaoTest \
+            --tests ceui.lisa.database.DownloadDaoDoneCardCountTest \
+            --tests ceui.lisa.database.DownloadDaoDeleteAllTest \
             --tests ceui.lisa.core.ManagerRestoreTest \
             --tests ceui.lisa.core.DownloadTaskTest \
             --tests ceui.lisa.core.ManagerStagingConcurrencyTest \
@@ -35,6 +43,25 @@ jobs:
             --tests ceui.lisa.core.ManagerDispatchScopeTest \
             --tests ceui.lisa.core.ManagerStartOneScopeTest \
             --tests ceui.pixiv.ui.detail.PageDownloadFabStateTest
+      - name: Summarize regression results
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          rows = []
+          for path in sorted(Path('app/build/test-results').rglob('TEST-*.xml')):
+              root = ET.parse(path).getroot()
+              rows.append((root.attrib.get('name', path.stem), *(int(root.attrib.get(k, 0)) for k in ('tests', 'failures', 'errors', 'skipped'))))
+          totals = [sum(row[i] for row in rows) for i in range(1, 5)]
+          report = ['| Suite | Tests | Failures | Errors | Skipped |', '| --- | ---: | ---: | ---: | ---: |']
+          report += ['| ' + ' | '.join(map(str, row)) + ' |' for row in rows]
+          report += ['| TOTAL | ' + ' | '.join(map(str, totals)) + ' |']
+          print('\n'.join(report) if rows else 'No JUnit reports produced; inspect the Gradle step.')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('\n'.join(report) if rows else 'No JUnit reports produced.\n')
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:

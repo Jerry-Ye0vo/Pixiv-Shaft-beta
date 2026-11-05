@@ -1,12 +1,15 @@
 package ceui.lisa.core
 
 import android.app.Application
+import androidx.room.Room
+import ceui.lisa.database.AppDatabase
 import ceui.lisa.activities.Shaft
 import ceui.lisa.utils.Settings
 import com.blankj.utilcode.util.Utils
 import com.google.gson.Gson
 import org.junit.Assert.*
 import org.junit.Before
+import org.junit.After
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -23,6 +26,7 @@ import java.util.concurrent.TimeUnit
 class ManagerManualQueueTest {
     private lateinit var manager: Manager
     private lateinit var content: CopyOnWriteArrayList<DownloadItem>
+    private lateinit var database: AppDatabase
     private fun item(id: Int, state: Int = DownloadItem.DownloadState.INIT): DownloadItem =
         Gson().fromJson("""{"uuid":"task-$id","name":"p$id.jpg","url":"https://example.invalid/$id.jpg",
           "index":$id,"state":$state,"illust":{"id":1,"page_count":20,"title":"test"}}""",
@@ -33,10 +37,21 @@ class ManagerManualQueueTest {
         Utils.init(app)
         ReflectionHelpers.setStaticField(Shaft::class.java, "sContext", app)
         Shaft.sSettings = Settings().apply { maxConcurrentDownloads = 3; downloadLimitType = 2 }
+        Shaft.sGson = Gson()
+        database = Room.inMemoryDatabaseBuilder(app, AppDatabase::class.java).allowMainThreadQueries().build()
+        ReflectionHelpers.setStaticField(AppDatabase::class.java, "INSTANCE", database)
         manager = ReflectionHelpers.callConstructor(Manager::class.java)
         content = CopyOnWriteArrayList((0..2).map { item(it, DownloadItem.DownloadState.DOWNLOADING) })
         content.addAll((3..12).map { item(it) })
         ReflectionHelpers.setField(manager, "content", content)
+    }
+
+    @After fun cleanup() {
+        val writes = ReflectionHelpers.getField<java.util.concurrent.ExecutorService>(manager, "queueWrites")
+        writes.submit {}.get(10, TimeUnit.SECONDS)
+        writes.shutdown()
+        AppDatabase.destroyInstance()
+        database.close()
     }
 
     @Test fun repeatedManualRequestsWaitAtCapacity() {

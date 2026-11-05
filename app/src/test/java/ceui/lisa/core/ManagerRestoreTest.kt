@@ -125,10 +125,12 @@ class ManagerRestoreTest {
         }
         awaitCondition {
             synchronized(manager) {
-                ReflectionHelpers.getField<Any?>(manager, "restoreLiveUrls") == null
+                ReflectionHelpers.getField<Any?>(manager, "restoreLiveKeys") == null
             }
         }
         assertTrue(manager.contentSnapshot().isEmpty())
+        ReflectionHelpers.getField<java.util.concurrent.ExecutorService>(manager, "queueWrites")
+            .submit {}.get(10, TimeUnit.SECONDS)
         assertEquals(0L, db.downloadDao().getDownloadingHighWaterMark())
     }
 
@@ -174,3 +176,4 @@ class ManagerRestoreTest {
         }
     }
 }
+
