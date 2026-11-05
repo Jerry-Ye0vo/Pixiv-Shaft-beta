@@ -1,0 +1,40 @@
+name: Unified queue regression
+on:
+  push:
+    branches: [feat/unified-content-queue]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Test manual admission, dispatch scopes and page state
+        run: |
+          bash ./gradlew :app:testGithubDebugUnitTest --console=plain --build-cache \
+            -PSHAFT_TEST_ABI=arm64-v8a -PSHAFT_BETA_TEST=true \
+            --tests ceui.lisa.core.ManagerManualQueueTest \
+            --tests ceui.lisa.core.ManagerDispatchScopeTest \
+            --tests ceui.lisa.core.ManagerStartOneScopeTest \
+            --tests ceui.pixiv.ui.detail.PageDownloadFabStateTest
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unified-queue-regression
+          path: |
+            app/build/reports/tests/
+            app/build/test-results/
+          if-no-files-found: ignore

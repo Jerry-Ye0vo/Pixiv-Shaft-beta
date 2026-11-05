@@ -144,6 +144,7 @@ public class Manager {
      * 放进这里的作品单独享有派发资格，跑完（没有待派发 / 在传的页）由 pump 收回。
      */
     private final java.util.Set<Long> releasedIllusts = ConcurrentHashMap.newKeySet();
+    private final java.util.Set<String> releasedPages = ConcurrentHashMap.newKeySet();
 
     /** 登记传输句柄，同时把 uuid 从 [dispatching] 摘掉（"正在派发"窗口到此为止）。 */
     private void registerHandle(String uuid, DownloadTask d) {
@@ -441,6 +442,7 @@ public class Manager {
         // 空间不足等）根本没建句柄，靠这一行把 uuid 从 dispatching 摘掉，否则它会一直
         // 留在集合里，让这条 item 之后再也无法被 resurrectIfStranded 复位。
         dispatching.remove(item.getUuid());
+        releasedPages.remove(item.getUuid());
         if (isDownloadSuccess) {
             item.setState(DownloadItem.DownloadState.SUCCESS);
             setCallback(uuid, null);
@@ -559,58 +561,17 @@ public class Manager {
         pumpAvailableSlots();
     }
 
-    /**
-     * 单卡「开始」：只把被点的那一条推下去，不顺带放行其它等待项。
-     *
-     * <p>与 {@link #startAll} / {@link #triggerPump} 的差别是**范围**：那两个是全局动作，
-     * 会把 content 里所有 INIT 项一起放行；这里是用户对**这一条**的意志。
-     *
-     * <p>历史上这里是 {@code isRunning = true; pumpAvailableSlots();} —— 在「仅通过 Wi-Fi
-     * 下载」切到蜂窝时（{@link #parkForNetwork} 把在传的翻回 INIT 且**不置 paused**），
-     * {@link #pumpAvailableSlots} 的 {@link #getFirstReady} 会把所有等待项一起挑走：用户
-     * 「只想先下其中一个」，结果连带数量 = maxConcurrentDownloads，且每条完成后的 onFinally
-     * 再 pump 一轮继续带走剩下的 —— 整队都在蜂窝上跑起来。改前的 stopAll() 语义
-     * （paused=true）恰好把兄弟项挡在 getFirstReady 之外，是 parkForNetwork 换掉暂停语义
-     * 之后暴露出来的。
-     *
-     * <p>现在只有全局泵本来就开着（模式 0 / 模式 1 且在 Wi-Fi —— 自动路径本来就该填满
-     * 槽位）才顺带 pump；泵关着（{@link #parkForNetwork} 熄火、冷启动恢复、模式 2 入列）
-     * 时一条都不带。口径见 {@link #fanOutOthersOnStartOne(boolean)}。
-     *
-     * <p>取舍：泵开着且槽位已满时，被点的那一条会立刻起（可能瞬时
-     * maxConcurrentDownloads+1）—— 用户手动点的那一条优先于自动并发上限；自动路径
-     * （pump）的并发上限不变。
-     */
-    public void startOne(String uuid) {
-        DownloadItem target = null;
-        for (DownloadItem downloadItem : contentSnapshot()) {
-            if (downloadItem != null && downloadItem.getUuid().equals(uuid)) {
-                downloadItem.setPaused(false);
-                resurrectIfStranded(downloadItem);
-                target = downloadItem;
-                break;
+    /** Release only the selected page; all starts pass through the bounded pump. */
+    public synchronized void startOne(String uuid) {
+        for (DownloadItem item : content) {
+            if (uuid.equals(item.getUuid())) {
+                item.setPaused(false);
+                resurrectIfStranded(item);
+                releasedPages.add(uuid);
+                pumpAvailableSlots();
+                ManagerReactive.invalidate();
+                return;
             }
-        }
-        if (target == null) {
-            // 目标已经不在了（被 clearOne / 清空全部拿掉）：什么都不做，尤其不能顺手
-            // pump 把别的等待项带起来。
-            ManagerReactive.invalidate();
-            return;
-        }
-        Common.showLog("已开始 " + uuid);
-
-        // 只派发这一条 —— 与 pumpAvailableSlots 共用同一段派发逻辑，并在同一把锁里做
-        // 「state 检查 + 置 DOWNLOADING + 登记 dispatching」，避免和并发的 pump /
-        // onFinally 抢同一条（同 pumpAvailableSlots 的 synchronized 理由）。
-        synchronized (this) {
-            if (target.getState() == DownloadItem.DownloadState.INIT && !target.isPaused()) {
-                dispatchOne(target);
-            }
-        }
-
-        // 泵本来就开着才顺带填满其它槽位；泵关着时保持关着 —— 这次放行只覆盖这一条。
-        if (fanOutOthersOnStartOne(isRunning)) {
-            pumpAvailableSlots();
         }
         ManagerReactive.invalidate();
     }
@@ -661,6 +622,17 @@ public class Manager {
      */
     public synchronized boolean willDispatch(long illustId) {
         return isRunning || releasedIllusts.contains(illustId);
+    }
+
+    /** Includes manual page requests waiting for a slot, without releasing sibling pages. */
+    public synchronized boolean willDispatchPage(long illustId, int page) {
+        if (willDispatch(illustId)) return true;
+        for (DownloadItem item : content) {
+            if (item.getIllust() != null && item.getIllust().getId() == illustId
+                    && item.getIndex() == page && !item.isPaused()
+                    && releasedPages.contains(item.getUuid())) return true;
+        }
+        return false;
     }
 
     /**
@@ -727,6 +699,7 @@ public class Manager {
         }
         isRunning = false;
         releasedIllusts.clear();
+        releasedPages.clear();
         // cancel 全部正在传输的下载（snapshot 防 CME）
         for (DownloadTask d : new ArrayList<>(handles.values())) {
             try { d.cancel(); } catch (Exception ignored) {}
@@ -780,6 +753,7 @@ public class Manager {
         // 详情页单独放行的作品也一并收回：离开 Wi-Fi 后同样退回等待，要走流量需用户再点一次。
         isRunning = false;
         releasedIllusts.clear();
+        releasedPages.clear();
         for (DownloadTask d : new ArrayList<>(handles.values())) {
             try { d.cancel(); } catch (Exception ignored) {}
         }
@@ -794,7 +768,8 @@ public class Manager {
         ManagerReactive.invalidate();
     }
 
-    public void stopOne(String uuid){
+    public synchronized void stopOne(String uuid){
+        releasedPages.remove(uuid);
         for (DownloadItem item : contentSnapshot()) {
             if(item.getUuid().equals(uuid)){
                 item.setPaused(true);
@@ -855,7 +830,7 @@ public class Manager {
      * 把手动暂停的 item 也强制恢复 —— FragmentSettings 调这个。
      */
     public synchronized void pumpAvailableSlots() {
-        if (!isRunning && releasedIllusts.isEmpty()) return;
+        if (!isRunning && releasedIllusts.isEmpty() && releasedPages.isEmpty()) return;
         int max = Shaft.sSettings.getMaxConcurrentDownloads();
         if (max < 1) max = 1;
         if (max > 5) max = 5;
@@ -931,7 +906,9 @@ public class Manager {
     /** 找出可以 dispatch 的下一条：state=INIT、未暂停，且在派发范围内（见 [isDispatchable]）。 */
     private DownloadItem getFirstReady() {
         for (DownloadItem it : content) {
-            if (isDispatchable(it, isRunning, releasedIllusts)) return it;
+            if (isDispatchable(it, isRunning, releasedIllusts)
+                    || (releasedPages.contains(it.getUuid()) && !it.isPaused()
+                        && it.getState() == DownloadItem.DownloadState.INIT)) return it;
         }
         return null;
     }

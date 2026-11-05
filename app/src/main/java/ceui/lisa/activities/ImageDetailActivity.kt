@@ -987,7 +987,7 @@ class ImageDetailActivity : BaseActivity<ActivityImageDetailBinding?>() {
         val illust = mIllust ?: return null
         return resolvePageDownloadFabState(
             Manager.get().contentSnapshot(), illust.id, page,
-            dispatchScheduled = Manager.get().willDispatch(illust.id),
+            dispatchScheduled = Manager.get().willDispatchPage(illust.id, page),
         )
     }
 
