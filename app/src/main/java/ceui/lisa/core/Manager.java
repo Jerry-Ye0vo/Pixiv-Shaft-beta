@@ -36,7 +36,6 @@ import ceui.lisa.activities.Shaft;
 import ceui.lisa.database.AppDatabase;
 import ceui.lisa.database.DownloadDao;
 import ceui.lisa.database.DownloadEntity;
-import ceui.lisa.database.DownloadingEntity;
 import ceui.lisa.download.DownloadFileFactory;
 import ceui.lisa.download.DownloadProgress;
 import ceui.lisa.download.MediaStoreUtil;
@@ -284,38 +283,38 @@ public class Manager {
                 reportPersistenceError("legacy-import", migrationError);
             }
             IO.execute(() -> {
-            boolean failed = false;
-            try {
-                AppDatabase database = AppDatabase.getAppDatabase(mContext);
-                List<DownloadItem> restored = readRestoredDownloads(database.downloadDao(), Shaft.sGson);
-                if (restored.isEmpty()) return;
-                synchronized (this) {
-                    if (generation != restoreGeneration) return; // User cleared the queue.
-                    restored.removeIf(item -> restoreLiveKeys.contains(PageQueuePersistence.key(item)));
-                    if (DownloadLimitTypeUtil.enqueueAsPaused()) {
-                        // 「不自动下载」恢复出来的项同样没有自动唤醒源，与入列口径一致地呈现为
-                        // 用户暂停；仅 Wi-Fi 的网络等待仍是 INIT（回 Wi-Fi 会唤醒）。
-                        for (DownloadItem item : restored) {
-                            item.setPaused(true);
+                boolean failed = false;
+                try {
+                    AppDatabase database = AppDatabase.getAppDatabase(mContext);
+                    List<DownloadItem> restored = readRestoredDownloads(database.downloadDao(), Shaft.sGson);
+                    if (restored.isEmpty()) return;
+                    synchronized (this) {
+                        if (generation != restoreGeneration) return; // User cleared the queue.
+                        restored.removeIf(item -> restoreLiveKeys.contains(PageQueuePersistence.key(item)));
+                        if (DownloadLimitTypeUtil.enqueueAsPaused()) {
+                            // 「不自动下载」恢复出来的项同样没有自动唤醒源，与入列口径一致地呈现为
+                            // 用户暂停；仅 Wi-Fi 的网络等待仍是 INIT（回 Wi-Fi 会唤醒）。
+                            for (DownloadItem item : restored) {
+                                item.setPaused(true);
+                            }
+                        }
+                        restored.addAll(content); // Preserve work added while recovery was running.
+                        content = new CopyOnWriteArrayList<>(restored);
+                    }
+                    ManagerReactive.invalidate();
+                    postMain(() ->
+                            DownloadToasts.show(DownloadToastKind.RECORD_RESTORED, "下载记录恢复成功"));
+                } catch (Throwable t) {
+                    failed = true;
+                    Common.showLog("Manager restore failed: " + t.getMessage());
+                } finally {
+                    synchronized (this) {
+                        if (generation == restoreGeneration) {
+                            restoreLiveKeys = null;
+                            if (failed) restoreStarted = false;
                         }
                     }
-                    restored.addAll(content); // Preserve work added while recovery was running.
-                    content = new CopyOnWriteArrayList<>(restored);
                 }
-                ManagerReactive.invalidate();
-                postMain(() ->
-                        DownloadToasts.show(DownloadToastKind.RECORD_RESTORED, "下载记录恢复成功"));
-            } catch (Throwable t) {
-                failed = true;
-                Common.showLog("Manager restore failed: " + t.getMessage());
-            } finally {
-                synchronized (this) {
-                    if (generation == restoreGeneration) {
-                        restoreLiveKeys = null;
-                        if (failed) restoreStarted = false;
-                    }
-                }
-            }
             });
         });
     }
@@ -403,7 +402,7 @@ public class Manager {
             boolean isTaskExist = false;
             DownloadItem canonical = bean;
             for (DownloadItem item : content) {
-                if (item.isSame(bean)) {
+                if (PageQueuePersistence.key(item).equals(PageQueuePersistence.key(bean))) {
                     isTaskExist = true;
                     canonical = item;
                 }
@@ -460,6 +459,8 @@ public class Manager {
             } catch (Throwable t) {
                 synchronized (this) {
                     if (pendingPersistence.get(item.getUuid()) == ticket && content.contains(item)) {
+                        // Make retry eligible atomically with publishing failure, not a later finally.
+                        pendingPersistence.remove(item.getUuid(), ticket);
                         persistenceFailures.add(item.getUuid());
                         item.setState(DownloadItem.DownloadState.FAILED);
                     }

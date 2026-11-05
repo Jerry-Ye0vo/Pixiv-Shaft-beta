@@ -182,4 +182,29 @@ class ManagerAdmissionTest {
         drain()
         assertEquals(replacement.uuid, db.downloadDao().getDownloadingByFileName("shared.jpg").uuid)
     }
+
+    @Test fun identicalUrlAndFilenameDoNotSilentlyDeduplicateDifferentPages() {
+        val first = item(7, "shared.jpg", "https://example.invalid/shared-preview.jpg")
+        val second = item(8, "shared.jpg", "https://example.invalid/shared-preview.jpg")
+        manager.addTask(first)
+        manager.addTask(second)
+        drain()
+        assertTrue(manager.contentSnapshot().contains(second))
+        assertTrue("Different page must report a collision, not disappear", second.isFailed)
+        assertEquals(first.uuid, db.downloadDao().getDownloadingByFileName(first.name).uuid)
+    }
+
+    @Test fun batchPreservesDistinctOutputNamesForTheSameResource() {
+        val first = item(7, "first-output.jpg")
+        val second = item(7, "second-output.jpg").apply { uuid = "other-output" }
+        manager.addTasks(listOf(first, second))
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        while (manager.contentSnapshot().none { it.uuid == second.uuid }) {
+            check(System.nanoTime() < deadline) { "Batch was not reserved" }
+            Thread.sleep(5)
+        }
+        drain()
+        assertEquals(first.uuid, db.downloadDao().getDownloadingByFileName(first.name).uuid)
+        assertEquals(second.uuid, db.downloadDao().getDownloadingByFileName(second.name).uuid)
+    }
 }

@@ -17,7 +17,8 @@ final class PageQueuePersistence {
     private PageQueuePersistence() {}
 
     static String key(DownloadItem item) {
-        return item.getName().length() + ":" + item.getName() + item.getUrl();
+        return item.getIllust().getId() + ":" + item.getIndex() + ":"
+                + item.getName().length() + ":" + item.getName() + item.getUrl();
     }
 
     static String snapshot(Gson gson, DownloadItem item, boolean paused, int state) {
