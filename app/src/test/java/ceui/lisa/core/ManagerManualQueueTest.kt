@@ -26,7 +26,7 @@ class ManagerManualQueueTest {
             DownloadItem::class.java)
 
     @Before fun setup() {
-        val app = RuntimeEnvironment.getApplication<Application>()
+        val app = RuntimeEnvironment.getApplication()
         Utils.init(app)
         ReflectionHelpers.setStaticField(Shaft::class.java, "sContext", app)
         Shaft.sSettings = Settings().apply { maxConcurrentDownloads = 3; downloadLimitType = 2 }
