@@ -149,6 +149,11 @@ public class DownloadItem implements Serializable {
         return this.state == DownloadState.FAILED;
     }
 
+    /** Raw terminal result: a late pause must not hide a committed output from cleanup. */
+    public boolean isSuccess() {
+        return this.state == DownloadState.SUCCESS;
+    }
+
     public int getState() {
         if (this.state == DownloadState.FAILED) {
             return DownloadState.FAILED;
@@ -227,3 +232,4 @@ public class DownloadItem implements Serializable {
         public static final int PAUSED = 4;
     }
 }
+

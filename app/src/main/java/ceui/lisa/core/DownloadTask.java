@@ -10,7 +10,7 @@ import ceui.lisa.utils.Common;
 /**
  * {@link Manager} 单条传输的执行/取消句柄，替代原先的
  * {@code Observable.create(...).subscribeOn(io).observeOn(io).doFinally(...).subscribe(onNext, onError)}
- * + {@code Disposable}。语义逐条对齐 RxJava 2：
+ * + {@code Disposable}。事件交付沿用 RxJava 2 语义，资源释放等待实际退出：
  *
  * <ul>
  *   <li>{@link Body} 在 IO 线程跑，通过 {@link DownloadEmitter} 发 onNext / onComplete / onError；
@@ -22,9 +22,8 @@ import ceui.lisa.utils.Common;
  *       和 observeOn 跳变窗口的行为相同。</li>
  *   <li>{@code onNext} 消费者抛异常 → 转交 {@code onError}；{@code onError} 抛异常 → 只打日志
  *       （对应 RxJavaPlugins 的全局兜底，不 crash）。</li>
- *   <li>{@code onFinally} 恰好跑一次：正常结束时在 IO 线程、任务收尾之后；被 {@link #cancel()}
- *       时立刻在调用 cancel 的线程上跑（和 doFinally 对 dispose 的行为一致），之后 Body
- *       自己看 isDisposed 退出，不会再触发一次。</li>
+ *   <li>{@code onFinally} 恰好跑一次，且只在 Body 和消费回调均已退出后运行。
+ *       尚未执行的任务可立即取消；运行中的任务必须等待退出，调用者才能安全释放文件锁与名额。</li>
  *   <li>{@link #cancel()} 只在 Body 还在跑（producing 阶段）时中断工作线程（Rx 的
  *       subscribeOn worker dispose 也会 interrupt）；已进入消费阶段就不中断——Rx 里消费者
  *       在另一条 observeOn 线程上，dispose 本来就碰不到它，DB 写入 / finishWrite 不能被打断。</li>
@@ -40,9 +39,10 @@ final class DownloadTask {
         void accept(T value) throws Exception;
     }
 
-    private static final int PRODUCING = 0;
-    private static final int CONSUMING = 1;
-    private static final int DONE = 2;
+    private static final int QUEUED = 0;
+    private static final int PRODUCING = 1;
+    private static final int CONSUMING = 2;
+    private static final int DONE = 3;
 
     private final Body body;
     private final Consumer<String> onNext;
@@ -51,6 +51,7 @@ final class DownloadTask {
 
     private final AtomicBoolean cancelled = new AtomicBoolean(false);
     private final AtomicBoolean finallyRan = new AtomicBoolean(false);
+    private final AtomicBoolean submitted = new AtomicBoolean(false);
     /**
      * 守住「读 phase/worker → interrupt」与「phase 切换 → 清中断标记」两段的原子性：
      * 否则 cancel() 读到 PRODUCING 后被抢占，工作线程跑完交付、归还线程池、领走别条下载，
@@ -59,7 +60,7 @@ final class DownloadTask {
      */
     private final Object interruptLock = new Object();
     private Thread worker;
-    private int phase = PRODUCING;
+    private int phase = QUEUED;
 
     private DownloadTask(Body body, Consumer<String> onNext, Consumer<Throwable> onError, Runnable onFinally) {
         this.body = body;
@@ -80,7 +81,17 @@ final class DownloadTask {
 
     /** 提交到 [io] 执行。可在 [create] 之后、句柄登记完成之后再调。 */
     void start(ExecutorService io) {
-        io.execute(this::run);
+        if (!submitted.compareAndSet(false, true)) throw new IllegalStateException("Task already submitted");
+        try {
+            io.execute(this::run);
+        } catch (java.util.concurrent.RejectedExecutionException rejected) {
+            synchronized (interruptLock) { phase = DONE; }
+            try {
+                if (!cancelled.get()) onError.accept(rejected);
+            } catch (Throwable t) {
+                Common.showLog("DownloadTask rejection handler threw: " + t);
+            } finally { runFinally(); }
+        }
     }
 
     static DownloadTask launch(ExecutorService io, Body body, Consumer<String> onNext,
@@ -93,13 +104,18 @@ final class DownloadTask {
     /** 对应 {@code Disposable.dispose()}：幂等。 */
     void cancel() {
         if (!cancelled.compareAndSet(false, true)) return;
+        boolean neverStarted = false;
         synchronized (interruptLock) {
+            if (phase == QUEUED) {
+                phase = DONE;
+                neverStarted = true;
+            }
             Thread t = worker;
             if (phase == PRODUCING && t != null && t != Thread.currentThread()) {
                 t.interrupt();
             }
         }
-        runFinally();
+        if (neverStarted) runFinally();
     }
 
     boolean isCancelled() {
@@ -116,11 +132,10 @@ final class DownloadTask {
     }
 
     private void run() {
-        if (cancelled.get()) {
-            // 排队期间就被取消：doFinally 已在 cancel() 里跑过，Body 不再执行。
-            return;
-        }
         synchronized (interruptLock) {
+            // Claim execution atomically with cancellation, before exposing a live worker.
+            if (phase != QUEUED) return;
+            phase = PRODUCING;
             worker = Thread.currentThread();
         }
         Emitter emitter = new Emitter();
@@ -212,3 +227,4 @@ final class DownloadTask {
         }
     }
 }
+

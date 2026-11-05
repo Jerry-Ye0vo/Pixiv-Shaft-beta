@@ -130,7 +130,7 @@ public class Manager {
      *   - {@link #pumpAvailableSlots} 置 DOWNLOADING 时 add；
      *   - 句柄登记（{@link #registerHandle}）时 remove —— 窗口到此为止；
      *   - 任务终结（{@link #complete}）时 remove —— 覆盖"派发失败、根本没建句柄"的路径；
-     *   - {@link #stopAll()} 时整体 clear —— 停止后所有 item 都 paused，不参与误判。
+     *   - 暂停不清除：等待准备阶段退出或登记句柄，防止快速继续重复派发。
      */
     private final java.util.Set<String> dispatching = ConcurrentHashMap.newKeySet();
     private boolean isRunning = false;
@@ -147,9 +147,31 @@ public class Manager {
     private final java.util.Set<String> releasedPages = ConcurrentHashMap.newKeySet();
 
     /** 登记传输句柄，同时把 uuid 从 [dispatching] 摘掉（"正在派发"窗口到此为止）。 */
-    private void registerHandle(String uuid, DownloadTask d) {
+    private synchronized void registerHandle(String uuid, DownloadTask d) {
         handles.put(uuid, d);
         dispatching.remove(uuid);
+        boolean allowed = false;
+        for (DownloadItem item : content) {
+            if (uuid.equals(item.getUuid())) { allowed = canContinueAttempt(item); break; }
+        }
+        if (!allowed) d.cancel();
+    }
+
+    private boolean canContinueAttempt(DownloadItem item) {
+        return content.contains(item) && !item.isPaused()
+                && (isRunning || releasedPages.contains(item.getUuid())
+                    || releasedIllusts.contains(item.getIllust().getId()));
+    }
+
+    /** Called after the worker and its storage cleanup have stopped touching resources. */
+    private synchronized void workerTerminated(DownloadItem item) {
+        DownloadTask ended = handles.remove(item.getUuid());
+        if (ended != null && ended.isCancelled()
+                && !item.isSuccess() && !item.isFailed()) {
+            item.setState(DownloadItem.DownloadState.INIT);
+        }
+        ManagerReactive.invalidate();
+        postMain(this::pumpAvailableSlots);
     }
 
     /**
@@ -639,12 +661,8 @@ public class Manager {
      * 把"看似在跑但实际已经没有 disposable 在背后撑着"的 item 翻回 INIT，让
      * [pumpAvailableSlots] 重新挑选派发。两种来源：
      *
-     *  1. **stopAll() 之后**：stopAll 把 paused=true、dispose 全部 handles，但
-     *     **不动 state 字段**——getState() 在 paused=true 时直接返回 PAUSED，
-     *     UI 也显示 PAUSED，没问题。但 startAll 的 paused=false 一翻，state 字段
-     *     原值（DOWNLOADING）就暴露出来；这时 handles 已经空了，没人真在传。
-     *     pumpAvailableSlots 的 activeCount() 把它们算进活跃数，getFirstReady 又
-     *     只挑 INIT —— 槽位永远拉不到，下载彻底卡死（issue #873）。
+     * 暂停后的 worker/准备阶段仍保留名额。执行器确认退出时将取消项归为 INIT；
+     * 此处只修复确实没有句柄和准备阶段的 DOWNLOADING 残留，不提前重派仍在退出的任务。
      *
      * 冷启动 restore 带回的残留**不走这里**：readRestoredDownloads 已经把恢复出来的
      * item 状态统一归成 INIT（见那里的注释），恢复完就能直接被 pump 挑走，不需要先猜
@@ -691,7 +709,7 @@ public class Manager {
         }
     }
 
-    public void stopAll() {
+    public synchronized void stopAll() {
         for (DownloadItem item : contentSnapshot()) {
             if (item != null && !item.isFailed()) {
                 item.setPaused(true);
@@ -704,10 +722,7 @@ public class Manager {
         for (DownloadTask d : new ArrayList<>(handles.values())) {
             try { d.cancel(); } catch (Exception ignored) {}
         }
-        handles.clear();
-        // 停止后非 FAILED 的 item 都 paused（getState() 返回 PAUSED），不会再被误判成 stranded，
-        // dispatching 里的残留也一并清掉，免得 resume 时把还没派发的 uuid 当成"在跑"。
-        dispatching.clear();
+        // Stopping workers and preparation still own their slots until termination acknowledgement.
         Common.showLog("[DL-RACE] stopAll (已经停止)");
         ManagerReactive.invalidate();
     }
@@ -747,7 +762,7 @@ public class Manager {
      * 别把「不自动下载」也塞进这条路：它没有任何自动唤醒源（回到 Wi-Fi 也不会替它启动），
      * 入列时已按暂停态呈现（见 [DownloadLimitTypeUtil.enqueueAsPaused]），与本方法无关。
      */
-    public void parkForNetwork() {
+    public synchronized void parkForNetwork() {
         // 先熄火再取消：cancel 触发的 onFinally 会调 pumpAvailableSlots，
         // isRunning=false 让那一轮直接 return，避免又派发出去。
         // 详情页单独放行的作品也一并收回：离开 Wi-Fi 后同样退回等待，要走流量需用户再点一次。
@@ -757,7 +772,6 @@ public class Manager {
         for (DownloadTask d : new ArrayList<>(handles.values())) {
             try { d.cancel(); } catch (Exception ignored) {}
         }
-        handles.clear();
         for (DownloadItem item : contentSnapshot()) {
             int s = item.getState();
             if (s == DownloadItem.DownloadState.DOWNLOADING || s == DownloadItem.DownloadState.INIT) {
@@ -777,7 +791,7 @@ public class Manager {
                 break;
             }
         }
-        DownloadTask d = handles.remove(uuid);
+        DownloadTask d = handles.get(uuid);
         if (d != null) {
             try { d.cancel(); } catch (Exception ignored) {}
         }
@@ -894,18 +908,20 @@ public class Manager {
     /** 兼容老调用点：等价于 pumpAvailableSlots()。 */
     private void loop() { pumpAvailableSlots(); }
 
-    /** 当前正在传输的 page 数（state=DOWNLOADING 且 !paused）。 */
+    /** Live workers, including cancellation and output finalization, still occupy capacity. */
     private int activeCount() {
-        int n = 0;
+        Set<String> active = new HashSet<>(handles.keySet());
+        active.addAll(dispatching);
         for (DownloadItem it : content) {
-            if (!it.isPaused() && it.getState() == DownloadItem.DownloadState.DOWNLOADING) n++;
+            if (!it.isPaused() && it.getState() == DownloadItem.DownloadState.DOWNLOADING) active.add(it.getUuid());
         }
-        return n;
+        return active.size();
     }
 
     /** 找出可以 dispatch 的下一条：state=INIT、未暂停，且在派发范围内（见 [isDispatchable]）。 */
     private DownloadItem getFirstReady() {
         for (DownloadItem it : content) {
+            if (handles.containsKey(it.getUuid()) || dispatching.contains(it.getUuid())) continue;
             if (isDispatchable(it, isRunning, releasedIllusts)
                     || (releasedPages.contains(it.getUuid()) && !it.isPaused()
                         && it.getState() == DownloadItem.DownloadState.INIT)) return it;
@@ -953,6 +969,8 @@ public class Manager {
         // 所以放在它之后。这条保持 DOWNLOADING 且没有传输句柄，「全部继续」时由
         // resurrectIfStranded 复位重派。
         if (!StorageSpaceGuard.hasRoomForDownload(context)) {
+            dispatching.remove(downloadItem.getUuid());
+            downloadItem.setState(DownloadItem.DownloadState.INIT);
             StorageSpaceGuard.pauseDownloadsForLowStorage(context);
             return;
         }
@@ -1130,9 +1148,8 @@ public class Manager {
             }
             complete(downloadItem, false);
         }, () -> {
-            handles.remove(itemUuid);
             Common.showLog("[ARIA2] onFinally uuid=" + itemUuid);
-            postMain(this::pumpAvailableSlots);
+            workerTerminated(downloadItem);
         });
         registerHandle(itemUuid, d);
         d.start(IO);
@@ -1141,6 +1158,22 @@ public class Manager {
     private void startDownloadChain(Context context, DownloadItem downloadItem,
             DownloadFileFactory factory, Uri targetUri, String dlUrl,
             long passSize, boolean staged) {
+        synchronized (this) {
+            if (!canContinueAttempt(downloadItem)) {
+                // Preparation can outlive a pause/clear. Clean up off main before releasing its slot.
+                IO.execute(() -> {
+                    try { factory.abandonWrite(); } catch (Exception ignored) {}
+                    finally {
+                        synchronized (Manager.this) {
+                            downloadItem.setState(DownloadItem.DownloadState.INIT);
+                            dispatching.remove(downloadItem.getUuid());
+                        }
+                        postMain(this::pumpAvailableSlots);
+                    }
+                });
+                return;
+            }
+        }
         // 下载专用 H1.1 client，规避 H2 stream priority 串行化（详见 getDownloadOkHttpClient）。
         OkHttpClient client = getDownloadOkHttpClient();
 
@@ -1431,12 +1464,20 @@ public class Manager {
         }, () -> {
             // 这条传完了：释放 stage 单主锁 + 把句柄从表里移除，主线程上 pump 下一个
             // 空闲槽位。onFinally 对 onNext / onError / cancel(暂停) 都会跑，在这里释放锁最稳。
-            if (acquiredStage) {
-                activeStageKeys.remove(stageKey);
-            }
-            handles.remove(itemUuid);
-            Common.showLog("onFinally uuid=" + itemUuid);
-            postMain(this::pumpAvailableSlots);
+            IO.execute(() -> {
+                try {
+                    DownloadTask ended = handles.get(itemUuid);
+                    if (ended != null && ended.isCancelled()
+                            && !downloadItem.isSuccess()) {
+                        factory.abandonWrite();
+                    }
+                } catch (Exception e) {
+                    Timber.tag("ContentQueue").w(e, "Cancelled output cleanup failed");
+                } finally {
+                    if (acquiredStage) activeStageKeys.remove(stageKey);
+                    workerTerminated(downloadItem);
+                }
+            });
         });
         // 先登记句柄、再启动：极快路径（stage 已完整，commit 不走网络）会在主线程执行到
         // 这一行之前就跑完 onFinally → handles.remove。先注册保证 remove 永远晚于 put，
@@ -1963,4 +2004,5 @@ public class Manager {
         activeStageKeys.remove(StageStore.keyForUrl(url));
     }
 }
+
 

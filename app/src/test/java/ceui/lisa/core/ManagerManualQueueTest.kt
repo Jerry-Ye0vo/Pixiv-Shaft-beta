@@ -14,6 +14,9 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import org.robolectric.util.ReflectionHelpers
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28], application = Application::class)
@@ -64,4 +67,67 @@ class ManagerManualQueueTest {
         assertNull(ReflectionHelpers.callInstanceMethod<DownloadItem?>(manager, "getFirstReady"))
         assertFalse(manager.willDispatchPage(1, 3))
     }
+
+    @Test fun pausedWorkerRetainsCapacityUntilItsBodyExits() {
+        Shaft.sSettings.maxConcurrentDownloads = 1
+        content.removeIf { it.uuid == "task-1" || it.uuid == "task-2" }
+        val running = content.first()
+        val handles = ReflectionHelpers.getField<MutableMap<String, DownloadTask>>(manager, "handles")
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val ended = CountDownLatch(1)
+        val io = Executors.newSingleThreadExecutor()
+        val task = DownloadTask.create({
+            started.countDown()
+            while (release.count > 0) {
+                try { release.await() } catch (_: InterruptedException) { /* delayed shutdown */ }
+            }
+        }, {}, {}, {
+            ReflectionHelpers.callInstanceMethod<Void>(manager, "workerTerminated",
+                ReflectionHelpers.ClassParameter.from(DownloadItem::class.java, running))
+            ended.countDown()
+        })
+        handles[running.uuid] = task
+        task.start(io)
+        try {
+            assertTrue(started.await(2, TimeUnit.SECONDS))
+            manager.stopOne(running.uuid)
+            manager.startOne("task-7")
+            assertSame(task, handles[running.uuid])
+            assertEquals(1, ReflectionHelpers.callInstanceMethod<Int>(manager, "activeCount"))
+            assertEquals(DownloadItem.DownloadState.INIT, content.first { it.uuid == "task-7" }.state)
+        } finally {
+            release.countDown()
+            io.shutdown()
+            assertTrue(io.awaitTermination(2, TimeUnit.SECONDS))
+        }
+        assertTrue(ended.await(2, TimeUnit.SECONDS))
+        assertFalse(handles.containsKey(running.uuid))
+        assertEquals(0, ReflectionHelpers.callInstanceMethod<Int>(manager, "activeCount"))
+    }
+
+    @Test fun pauseAndResumeDuringPreparationDoesNotDispatchTwice() {
+        val pending = content.first()
+        val dispatching = ReflectionHelpers.getField<MutableSet<String>>(manager, "dispatching")
+        dispatching.add(pending.uuid)
+        manager.stopAll()
+        manager.startOne(pending.uuid)
+        assertTrue(dispatching.contains(pending.uuid))
+        assertEquals(1, ReflectionHelpers.callInstanceMethod<Int>(manager, "activeCount"))
+        assertNull(ReflectionHelpers.callInstanceMethod<DownloadItem?>(manager, "getFirstReady"))
+    }
+
+    @Test fun latePauseCannotTurnCommittedOutputBackIntoQueuedWork() {
+        val committed = content.first()
+        val handles = ReflectionHelpers.getField<MutableMap<String, DownloadTask>>(manager, "handles")
+        val task = DownloadTask.create({}, {}, {}, {})
+        handles[committed.uuid] = task
+        task.cancel()
+        committed.state = DownloadItem.DownloadState.SUCCESS
+        committed.isPaused = true
+        ReflectionHelpers.callInstanceMethod<Void>(manager, "workerTerminated",
+            ReflectionHelpers.ClassParameter.from(DownloadItem::class.java, committed))
+        assertTrue(committed.isSuccess)
+    }
 }
+
