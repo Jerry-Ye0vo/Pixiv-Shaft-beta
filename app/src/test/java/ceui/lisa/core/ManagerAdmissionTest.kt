@@ -9,6 +9,7 @@ import ceui.lisa.utils.Settings
 import ceui.pixiv.download.toast.DownloadToastKind
 import com.blankj.utilcode.util.Utils
 import com.google.gson.Gson
+import com.google.gson.JsonSerializer
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -137,6 +138,26 @@ class ManagerAdmissionTest {
         drain()
         assertEquals(target.uuid, db.downloadDao().getDownloadingByFileName(target.name).uuid)
         assertTrue(manager.contentSnapshot().contains(target))
+    }
+
+    @Test fun clearDuringSerializationIsAppliedAfterTheLateInsertCommits() {
+        val serializing = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        Shaft.sGson = gson.newBuilder().registerTypeAdapter(DownloadItem::class.java,
+            JsonSerializer<DownloadItem> { source, _, _ ->
+                serializing.countDown()
+                check(release.await(10, TimeUnit.SECONDS))
+                gson.toJsonTree(source)
+            }).create()
+        val target = item(7)
+        try {
+            manager.addTask(target)
+            assertTrue(serializing.await(10, TimeUnit.SECONDS))
+            manager.clearOne(target.uuid)
+            assertFalse(manager.contentSnapshot().contains(target))
+        } finally { release.countDown() }
+        drain()
+        assertNull(db.downloadDao().getDownloadingByFileName(target.name))
     }
 
     @Test fun clearAllIsOrderedBeforeSubsequentNewAdmissions() {
