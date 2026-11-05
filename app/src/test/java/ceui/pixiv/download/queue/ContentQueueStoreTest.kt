@@ -57,10 +57,11 @@ class ContentQueueStoreTest {
     @Test fun distinctStoreHandlesShareCapacityAndDoNotResetLiveWorkers() {
         enqueue("one"); enqueue("two")
         val first = store.claim(Pool.NETWORK, 1)
-        ContentQueueStore(app, name).use { other ->
+        val other = ContentQueueStore(app, name)
+        try {
             assertNull(other.claim(Pool.NETWORK, 1))
             assertEquals(first.attempt, other.get(first.id).attempt)
-        }
+        } finally { other.close() }
     }
 
     @Test fun stoppingWorkerOwnsSlotUntilAcknowledgedAndOldAttemptsAreIgnored() {
@@ -141,6 +142,16 @@ class ContentQueueStoreTest {
         assertNull(store.claim(Pool.NETWORK, 2))
         assertTrue(store.finish(old, attempt, false, null))
         assertEquals(fresh, store.claim(Pool.NETWORK, 2).id)
+    }
+
+    @Test fun replacingResourceStillWaitsForPreviousOutputWriter() {
+        val old = enqueue("gallery-path", "original-v1")
+        val attempt = store.claim(Pool.NETWORK, 2).attempt
+        store.cancel(old)
+        val replacement = enqueue("gallery-path", "original-v2", Pool.COPY)
+        assertNull(store.claim(Pool.COPY, 1))
+        assertTrue(store.finish(old, attempt, false, null))
+        assertEquals(replacement, store.claim(Pool.COPY, 1).id)
     }
 
     @Test fun failedTransactionCannotCreatePhantomQueuedTask() {

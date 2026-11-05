@@ -79,7 +79,7 @@ public final class ContentQueueStore extends SQLiteOpenHelper {
                 c.moveToFirst(); if (c.getInt(0) >= capacity) return null;
             }
             String id;
-            try (Cursor c = db.rawQuery("SELECT id FROM tasks t WHERE pool=? AND state='QUEUED' AND NOT EXISTS (SELECT 1 FROM tasks live WHERE live.resource_key=t.resource_key AND live.state IN " + LIVE + ") ORDER BY seq LIMIT 1", new String[]{pool.name()})) {
+            try (Cursor c = db.rawQuery("SELECT id FROM tasks t WHERE pool=? AND state='QUEUED' AND NOT EXISTS (SELECT 1 FROM tasks live WHERE (live.resource_key=t.resource_key OR live.output_key=t.output_key) AND live.state IN " + LIVE + ") ORDER BY seq LIMIT 1", new String[]{pool.name()})) {
                 if (!c.moveToFirst()) return null;
                 id = c.getString(0);
             }
