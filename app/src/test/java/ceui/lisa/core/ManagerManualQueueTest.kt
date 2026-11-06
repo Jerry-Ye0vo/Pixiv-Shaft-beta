@@ -50,6 +50,8 @@ class ManagerManualQueueTest {
         val writes = ReflectionHelpers.getField<java.util.concurrent.ExecutorService>(manager, "queueWrites")
         writes.submit {}.get(10, TimeUnit.SECONDS)
         writes.shutdown()
+        ReflectionHelpers.getField<PageQueueOwner>(manager, "pageQueue").close()
+        RuntimeEnvironment.getApplication().deleteDatabase("content_queue.db")
         AppDatabase.destroyInstance()
         database.close()
     }

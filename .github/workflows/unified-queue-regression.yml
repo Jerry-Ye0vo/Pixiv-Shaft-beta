@@ -27,6 +27,8 @@ jobs:
           bash ./gradlew :app:testGithubDebugUnitTest --console=plain --build-cache \
             -PSHAFT_TEST_ABI=arm64-v8a -PSHAFT_BETA_TEST=true \
             --tests ceui.pixiv.download.queue.ContentQueueStoreTest \
+            --tests ceui.lisa.core.PageQueueOwnerTest \
+            --tests ceui.lisa.core.ManagerCoreDispatchTest \
             --tests ceui.lisa.core.ManagerAdmissionTest \
             --tests ceui.lisa.core.PageQueueCompatibilityTest \
             --tests ceui.pixiv.download.LegacyPageSaveMigrationTest \

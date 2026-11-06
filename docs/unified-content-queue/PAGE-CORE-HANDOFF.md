@@ -1,0 +1,11 @@
+# Page execution handoff
+
+The page paths already using Manager now obtain a persisted ContentQueueStore lease before starting storage preparation or a transfer (including aria2 dispatch). PageQueueOwner is owned by the process Manager; opening the store alone never resets running workers. The existing screen API and page executors remain in use.
+
+Admission commits the old Room pending record first, then the independent queue. Only the latter grants execution. A crash between commits leaves a replayable legacy intent. Import uses `page:<uuid>` and validates its complete output/resource identity. Existing core state wins; completed/cancelled tombstones prevent stale legacy rows from resurrecting work. Explicit submissions can replace waiting intents, but cannot revoke live output ownership.
+
+Pause, network parking, failure and cancellation keep the permit until worker cleanup exits. A resume during stopping records a deferred yield. A committed output retains capacity through cleanup; process-death recovery marks that acknowledged output successful. Completion and cancel acknowledgements update the compatibility journal without modifying completed-download tables, Room version, recorded-page probes or library queries. Failures to persist a worker acknowledgement retain the in-memory reservation and surface an error; process restart recovers it after the old worker is gone.
+
+All page phases conservatively hold a NETWORK permit. Separate COPY/ENCODE scheduling, shared-resource transfer reuse, other download entrypoints, cache/output receipt reconciliation and device validation remain future work. The filesystem commit and database acknowledgement are separate operations: this phase does not promise exactly-once filesystem writes after a crash in that interval. Completed/cancelled core payloads are compacted after journal cleanup, while identity tombstones remain; retention/garbage collection needs a later migration protocol.
+
+Tests cover legacy-only replay, failed core admission, idempotent import, core-only recovery, committed/cancelled stale journals, stop/resume tokens, resource exclusion and the Manager execution boundary. CI results must be checked for the exact submitted commit before treating this stage as verified. No package, signing or version change is included.

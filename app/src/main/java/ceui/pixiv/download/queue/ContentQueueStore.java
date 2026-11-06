@@ -7,6 +7,8 @@ import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteOpenHelper;
 import androidx.annotation.WorkerThread;
 import java.util.UUID;
+import java.util.ArrayList;
+import java.util.List;
 
 /** Durable admission core. Call on IO; workers run only after claim() commits.
  * A process owner must call recoverAfterProcessDeath() once before starting its workers.
@@ -14,13 +16,16 @@ import java.util.UUID;
  */
 @WorkerThread
 public final class ContentQueueStore extends SQLiteOpenHelper {
-    public enum State { QUEUED, RUNNING, PAUSE_REQUESTED, CANCEL_REQUESTED, PAUSED, FAILED, SUCCEEDED, CANCELLED }
+    public enum State { QUEUED, RUNNING, PAUSE_REQUESTED, YIELD_REQUESTED, CANCEL_REQUESTED,
+        FAILING, COMMITTED, PAUSED, FAILED, SUCCEEDED, CANCELLED }
     public enum Pool { NETWORK, COPY, ENCODE }
     public static final class Task {
         public final String id, outputKey, resourceKey, payload, attempt, error;
         public final Pool pool;
         public final State state;
+        public final long sequence;
         Task(Cursor c) {
+            sequence = c.getLong(c.getColumnIndexOrThrow("seq"));
             id = c.getString(c.getColumnIndexOrThrow("id"));
             outputKey = c.getString(c.getColumnIndexOrThrow("output_key"));
             resourceKey = c.getString(c.getColumnIndexOrThrow("resource_key"));
@@ -70,16 +75,23 @@ public final class ContentQueueStore extends SQLiteOpenHelper {
             return id;
         });
     }
-    private static final String LIVE = "('RUNNING','PAUSE_REQUESTED','CANCEL_REQUESTED')";
+    private static final String LIVE = "('RUNNING','PAUSE_REQUESTED','YIELD_REQUESTED','CANCEL_REQUESTED','FAILING','COMMITTED')";
     /** Atomically reserve capacity and a resource. A cancellation request still owns its slot. */
     public Task claim(Pool pool, int capacity) {
+        return claim(null, pool, capacity);
+    }
+
+    /** The owner selects eligibility (manual/network scope); the database authorizes execution. */
+    public Task claim(String requestedId, Pool pool, int capacity) {
         if (capacity < 1) return null;
         return transaction(db -> {
             try (Cursor c = db.rawQuery("SELECT count(*) FROM tasks WHERE pool=? AND state IN " + LIVE, new String[]{pool.name()})) {
                 c.moveToFirst(); if (c.getInt(0) >= capacity) return null;
             }
             String id;
-            try (Cursor c = db.rawQuery("SELECT id FROM tasks t WHERE pool=? AND state='QUEUED' AND NOT EXISTS (SELECT 1 FROM tasks live WHERE (live.resource_key=t.resource_key OR live.output_key=t.output_key) AND live.state IN " + LIVE + ") ORDER BY seq LIMIT 1", new String[]{pool.name()})) {
+            String requested = requestedId == null ? "" : " AND t.id=?";
+            String[] args = requestedId == null ? new String[]{pool.name()} : new String[]{pool.name(), requestedId};
+            try (Cursor c = db.rawQuery("SELECT id FROM tasks t WHERE pool=? AND state='QUEUED'" + requested + " AND NOT EXISTS (SELECT 1 FROM tasks live WHERE (live.resource_key=t.resource_key OR live.output_key=t.output_key) AND live.state IN " + LIVE + ") ORDER BY seq LIMIT 1", args)) {
                 if (!c.moveToFirst()) return null;
                 id = c.getString(0);
             }
@@ -100,8 +112,8 @@ public final class ContentQueueStore extends SQLiteOpenHelper {
     private void requestStop(String id, boolean cancel) {
         transaction(db -> {
             Task task = read(db, id);
-            if (task == null || task.state == State.SUCCEEDED || task.state == State.CANCELLED) return null;
-            boolean live = task.state == State.RUNNING || task.state == State.PAUSE_REQUESTED || task.state == State.CANCEL_REQUESTED;
+            if (task == null || terminal(task.state) || task.state == State.COMMITTED) return null;
+            boolean live = live(task.state);
             // Cancellation dominates a later pause request.
             if (task.state == State.CANCEL_REQUESTED) return null;
             ContentValues v = new ContentValues();
@@ -126,9 +138,11 @@ public final class ContentQueueStore extends SQLiteOpenHelper {
         return transaction(db -> {
             Task task = read(db, id);
             if (task == null || !attempt.equals(task.attempt)
-                    || !(task.state == State.RUNNING || task.state == State.PAUSE_REQUESTED || task.state == State.CANCEL_REQUESTED)) return false;
-            State state = committed ? State.SUCCEEDED : task.state == State.CANCEL_REQUESTED ? State.CANCELLED
-                    : task.state == State.PAUSE_REQUESTED ? State.PAUSED : State.FAILED;
+                    || !live(task.state)) return false;
+            State state = committed || task.state == State.COMMITTED ? State.SUCCEEDED
+                    : task.state == State.CANCEL_REQUESTED ? State.CANCELLED
+                    : task.state == State.PAUSE_REQUESTED ? State.PAUSED
+                    : task.state == State.YIELD_REQUESTED ? State.QUEUED : State.FAILED;
             ContentValues v = new ContentValues(); v.put("state", state.name()); v.putNull("attempt");
             if (state == State.FAILED) v.put("error", error); else v.putNull("error");
             db.update("tasks", v, "id=?", new String[]{id});
@@ -138,7 +152,141 @@ public final class ContentQueueStore extends SQLiteOpenHelper {
     /** Call only when no previous-process worker can still run; output reconciliation precedes replay. */
     public void recoverAfterProcessDeath() {
         transaction(db -> {
-            db.execSQL("UPDATE tasks SET state=CASE state WHEN 'RUNNING' THEN 'QUEUED' WHEN 'PAUSE_REQUESTED' THEN 'PAUSED' WHEN 'CANCEL_REQUESTED' THEN 'CANCELLED' END, attempt=NULL WHERE state IN " + LIVE);
+            db.execSQL("UPDATE tasks SET state=CASE state WHEN 'PAUSE_REQUESTED' THEN 'PAUSED' WHEN 'CANCEL_REQUESTED' THEN 'CANCELLED' WHEN 'COMMITTED' THEN 'SUCCEEDED' WHEN 'FAILING' THEN 'FAILED' ELSE 'QUEUED' END, attempt=NULL WHERE state IN " + LIVE);
+            return null;
+        });
+    }
+
+    private static boolean terminal(State state) { return state == State.SUCCEEDED || state == State.CANCELLED; }
+    private static boolean live(State state) {
+        return state == State.RUNNING || state == State.PAUSE_REQUESTED || state == State.YIELD_REQUESTED
+                || state == State.CANCEL_REQUESTED || state == State.FAILING || state == State.COMMITTED;
+    }
+
+    /** Stable-ID handoff. Imports never revive a terminal ID or supersede a newer output intent.
+     * Explicit new submissions may replace waiting intents, but cannot revoke a live worker.
+     */
+    public Task admit(String id, String outputKey, String resourceKey, Pool pool, String payload,
+                      State initial, boolean importing) {
+        if (id == null || id.isEmpty() || outputKey == null || outputKey.isEmpty() || resourceKey == null || resourceKey.isEmpty() || pool == null || payload == null
+                || !(initial == State.QUEUED || initial == State.PAUSED || initial == State.FAILED)) {
+            throw new IllegalArgumentException("Invalid stable admission");
+        }
+        return transaction(db -> {
+            Task existing = read(db, id);
+            if (existing != null && importing) {
+                if (!existing.outputKey.equals(outputKey) || !existing.resourceKey.equals(resourceKey)) {
+                    throw new IllegalStateException("Conflicting imported task ID: " + id);
+                }
+                return existing;
+            }
+            if (existing != null && (!existing.outputKey.equals(outputKey)
+                    || !existing.resourceKey.equals(resourceKey) || live(existing.state))) {
+                throw new IllegalStateException("Task identity is already owned: " + id);
+            }
+            State admittedState = initial;
+            try (Cursor c = db.rawQuery("SELECT * FROM tasks WHERE output_key=? AND id<>?", new String[]{outputKey, id})) {
+                while (c.moveToNext()) {
+                    Task other = new Task(c);
+                    if (importing) admittedState = State.CANCELLED;
+                    else if (live(other.state)) throw new IllegalStateException("Output has a live owner: " + other.id);
+                }
+            }
+            if (!importing) {
+                ContentValues cancelled = new ContentValues(); cancelled.put("state", State.CANCELLED.name());
+                db.update("tasks", cancelled, "output_key=? AND id<>? AND state IN ('QUEUED','PAUSED','FAILED')", new String[]{outputKey, id});
+            }
+            ContentValues v = new ContentValues(); v.put("output_key", outputKey); v.put("resource_key", resourceKey);
+            v.put("pool", pool.name()); v.put("payload", payload); v.put("state", admittedState.name());
+            v.putNull("attempt"); v.putNull("error");
+            if (existing == null) { v.put("id", id); db.insertOrThrow("tasks", null, v); }
+            else db.update("tasks", v, "id=?", new String[]{id});
+            return read(db, id);
+        });
+    }
+
+    /** Record a command without releasing a running worker's permit. */
+    public void updateRequest(String id, String payload, boolean paused, boolean failed) {
+        transaction(db -> {
+            Task task = read(db, id);
+            if (task == null || terminal(task.state) || task.state == State.COMMITTED
+                    || task.state == State.CANCEL_REQUESTED) return null;
+            State state = task.state;
+            if (failed) state = live(state) ? State.FAILING : State.FAILED;
+            else if (paused) state = live(state) ? State.PAUSE_REQUESTED : State.PAUSED;
+            else if (state == State.PAUSE_REQUESTED || state == State.FAILING) state = State.YIELD_REQUESTED;
+            else if (state == State.PAUSED || state == State.FAILED) state = State.QUEUED;
+            ContentValues v = new ContentValues(); v.put("payload", payload); v.put("state", state.name());
+            db.update("tasks", v, "id=?", new String[]{id});
+            return null;
+        });
+    }
+
+    /** Network parking stops the current attempt without turning it into a user pause. */
+    public void yieldAttempt(String id) {
+        transaction(db -> {
+            Task task = read(db, id);
+            if (task != null && (task.state == State.RUNNING || task.state == State.FAILING)) {
+                ContentValues v = new ContentValues(); v.put("state", State.YIELD_REQUESTED.name());
+                db.update("tasks", v, "id=?", new String[]{id});
+            }
+            return null;
+        });
+    }
+
+    /** Output is committed, but the worker keeps its permit through final cleanup. */
+    public boolean markCommitted(String id, String attempt) {
+        return transaction(db -> {
+            Task task = read(db, id);
+            if (task == null || attempt == null || !attempt.equals(task.attempt) || !live(task.state)) return false;
+            ContentValues v = new ContentValues(); v.put("state", State.COMMITTED.name()); v.putNull("error");
+            return db.update("tasks", v, "id=?", new String[]{id}) == 1;
+        });
+    }
+
+    public long highWaterMark() {
+        try (Cursor c = getReadableDatabase().rawQuery("SELECT IFNULL(MAX(seq),0) FROM tasks", null)) {
+            c.moveToFirst(); return c.getLong(0);
+        }
+    }
+
+    public List<Task> activePage(String prefix, long after, long through, int limit) {
+        List<Task> tasks = new ArrayList<>();
+        try (Cursor c = getReadableDatabase().rawQuery("SELECT * FROM tasks WHERE id LIKE ? AND seq>? AND seq<=? AND state NOT IN ('SUCCEEDED','CANCELLED') ORDER BY seq LIMIT ?",
+                new String[]{prefix + "%", String.valueOf(after), String.valueOf(through), String.valueOf(limit)})) {
+            while (c.moveToNext()) tasks.add(new Task(c));
+        }
+        return tasks;
+    }
+
+    /** Keep a small tombstone so an interrupted legacy import cannot resurrect completed work. */
+    public void compactTerminal(String id) {
+        ContentValues v = new ContentValues(); v.put("payload", "");
+        getWritableDatabase().update("tasks", v, "id=? AND state IN ('SUCCEEDED','CANCELLED')", new String[]{id});
+    }
+
+    public void cancelOrRemember(String id, String outputKey, String resourceKey) {
+        transaction(db -> {
+            Task task = read(db, id);
+            if (task == null) {
+                // Withdrawal during import/admission also needs a tombstone.
+                ContentValues old = new ContentValues(); old.put("state", State.CANCELLED.name());
+                db.update("tasks", old, "output_key=? AND state IN ('QUEUED','PAUSED','FAILED')", new String[]{outputKey});
+                ContentValues v = new ContentValues(); v.put("id", id); v.put("output_key", outputKey);
+                v.put("resource_key", resourceKey); v.put("pool", Pool.NETWORK.name()); v.put("payload", "");
+                v.put("state", State.CANCELLED.name()); db.insertOrThrow("tasks", null, v);
+            } else if (!terminal(task.state) && task.state != State.COMMITTED) {
+                ContentValues v = new ContentValues();
+                v.put("state", (live(task.state) ? State.CANCEL_REQUESTED : State.CANCELLED).name());
+                db.update("tasks", v, "id=?", new String[]{id});
+            }
+            return null;
+        });
+    }
+
+    public void cancelScope(String prefix) {
+        transaction(db -> {
+            db.execSQL("UPDATE tasks SET state=CASE WHEN state IN " + LIVE + " THEN 'CANCEL_REQUESTED' ELSE 'CANCELLED' END WHERE id LIKE ? AND state NOT IN ('SUCCEEDED','CANCELLED','COMMITTED')", new Object[]{prefix + "%"});
             return null;
         });
     }

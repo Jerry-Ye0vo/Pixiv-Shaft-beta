@@ -63,6 +63,8 @@ class ManagerAdmissionTest {
     @After fun cleanup() {
         drain()
         writes.shutdown()
+        ReflectionHelpers.getField<PageQueueOwner>(manager, "pageQueue").close()
+        RuntimeEnvironment.getApplication().deleteDatabase("content_queue.db")
         AppDatabase.destroyInstance()
         db.close()
     }

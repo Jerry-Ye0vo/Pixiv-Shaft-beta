@@ -68,6 +68,11 @@ import timber.log.Timber;
 public class Manager {
 
     private final Context mContext = Shaft.getContext();
+    private final PageQueueOwner pageQueue = new PageQueueOwner(mContext);
+    private final Map<String, ceui.pixiv.download.queue.ContentQueueStore.Task> leases = new ConcurrentHashMap<>();
+    private final Set<String> blockedClaims = ConcurrentHashMap.newKeySet();
+    private final Set<String> finalizing = ConcurrentHashMap.newKeySet();
+    private java.util.function.Consumer<DownloadItem> workerStarter = item -> downloadOne(mContext, item);
     /**
      * 下载列表。用 {@link CopyOnWriteArrayList}：写入（add/remove/clear）仍走
      * {@code synchronized (this)} 保证复合操作原子（去重 + add），但任何线程的遍历
@@ -171,14 +176,45 @@ public class Manager {
     }
 
     /** Called after the worker and its storage cleanup have stopped touching resources. */
-    private synchronized void workerTerminated(DownloadItem item) {
-        DownloadTask ended = handles.remove(item.getUuid());
-        if (ended != null && ended.isCancelled()
-                && !item.isSuccess() && !item.isFailed()) {
-            item.setState(DownloadItem.DownloadState.INIT);
+    private void workerTerminated(DownloadItem item) {
+        final ceui.pixiv.download.queue.ContentQueueStore.Task lease;
+        final boolean committed, stopped;
+        synchronized (this) {
+            DownloadTask ended = handles.remove(item.getUuid());
+            lease = leases.get(item.getUuid());
+            if (lease == null) {
+                if (ended != null && ended.isCancelled() && !item.isSuccess() && !item.isFailed()) {
+                    item.setState(DownloadItem.DownloadState.INIT);
+                }
+                dispatching.remove(item.getUuid());
+                postMain(this::pumpAvailableSlots);
+                return;
+            }
+            if (!finalizing.add(item.getUuid())) return;
+            dispatching.add(item.getUuid()); // cleanup ended; durable acknowledgement still owns capacity
+            committed = item.isSuccess();
+            stopped = !committed && !item.isFailed();
         }
-        ManagerReactive.invalidate();
-        postMain(this::pumpAvailableSlots);
+        queueWrites.execute(() -> {
+            try {
+                if (!pageQueue.finish(AppDatabase.getAppDatabase(mContext), Shaft.sGson,
+                        item, lease, committed, stopped)) {
+                    throw new IllegalStateException("Stale page worker acknowledgement");
+                }
+                synchronized (this) {
+                    leases.remove(item.getUuid(), lease);
+                    dispatching.remove(item.getUuid());
+                    finalizing.remove(item.getUuid());
+                    blockedClaims.clear();
+                    if (stopped && !item.isFailed() && !item.isSuccess()) item.setState(DownloadItem.DownloadState.INIT);
+                }
+                ManagerReactive.invalidate();
+                postMain(this::pumpAvailableSlots);
+            } catch (Throwable t) {
+                // Keep the reservation if acknowledgement fails. Restart recovery is safe after worker exit.
+                reportPersistenceError("worker acknowledgement", t);
+            }
+        });
     }
 
     /**
@@ -286,7 +322,7 @@ public class Manager {
                 boolean failed = false;
                 try {
                     AppDatabase database = AppDatabase.getAppDatabase(mContext);
-                    List<DownloadItem> restored = readRestoredDownloads(database.downloadDao(), Shaft.sGson);
+                    List<DownloadItem> restored = pageQueue.restore(database, Shaft.sGson);
                     if (restored.isEmpty()) return;
                     synchronized (this) {
                         if (generation != restoreGeneration) return; // User cleared the queue.
@@ -319,15 +355,19 @@ public class Manager {
         });
     }
 
-    static List<DownloadItem> readRestoredDownloads(DownloadDao dao, Gson gson) {
+    static Gson restoringGson(Gson gson) {
         // Match the complete metadata, not just the ID: an artwork may have been edited
         // between two downloads, with different pages or naming-template inputs.
         // Retain a compact digest rather than every artwork's additional JSON object tree.
         Map<ByteString, Illust> artworks = new HashMap<>();
-        Gson restoringGson = gson.newBuilder().registerTypeAdapter(Illust.class,
+        return gson.newBuilder().registerTypeAdapter(Illust.class,
                 (JsonDeserializer<Illust>) (json, type, context) ->
                         artworks.computeIfAbsent(ByteString.encodeUtf8(json.toString()).sha256(),
                                 key -> gson.fromJson(json, Illust.class))).create();
+    }
+
+    static List<DownloadItem> readRestoredDownloads(DownloadDao dao, Gson gson) {
+        Gson restoringGson = restoringGson(gson);
         List<DownloadItem> restored = new ArrayList<>();
         long after = 0;
         long through = dao.getDownloadingHighWaterMark();
@@ -452,7 +492,7 @@ public class Manager {
                 synchronized (this) {
                     if (pendingPersistence.get(item.getUuid()) != ticket || !content.contains(item)) return;
                 }
-                PageQueuePersistence.admit(AppDatabase.getAppDatabase(mContext), Shaft.sGson, item);
+                pageQueue.admit(AppDatabase.getAppDatabase(mContext), Shaft.sGson, item);
                 synchronized (this) {
                     if (pendingPersistence.get(item.getUuid()) == ticket) persistenceFailures.remove(item.getUuid());
                 }
@@ -499,9 +539,9 @@ public class Manager {
         final int state = item.getState();
         queueWrites.execute(() -> {
             try {
-                String json = PageQueuePersistence.snapshot(Shaft.sGson, item, paused, state);
-                AppDatabase.getAppDatabase(mContext).downloadDao()
-                        .updateDownloadingState(item.getName(), item.getUuid(), json);
+                pageQueue.update(AppDatabase.getAppDatabase(mContext), Shaft.sGson, item, paused, state);
+                blockedClaims.remove(item.getUuid());
+                postMain(this::pumpAvailableSlots);
             } catch (Throwable t) { reportPersistenceError("state", t); }
         });
     }
@@ -509,8 +549,7 @@ public class Manager {
     private void deletePersisted(DownloadItem item) {
         queueWrites.execute(() -> {
             try {
-                AppDatabase.getAppDatabase(mContext).downloadDao()
-                        .deleteDownloadingByIdentity(item.getName(), item.getUuid());
+                pageQueue.cancel(AppDatabase.getAppDatabase(mContext), item);
             } catch (Throwable t) { reportPersistenceError("remove", t); }
         });
     }
@@ -527,7 +566,7 @@ public class Manager {
      */
     private void complete(DownloadItem item, boolean isDownloadSuccess) {
         synchronized (this) {
-            dispatching.remove(item.getUuid());
+            if (!leases.containsKey(item.getUuid())) dispatching.remove(item.getUuid());
             releasedPages.remove(item.getUuid());
             if (isDownloadSuccess) {
                 item.setState(DownloadItem.DownloadState.SUCCESS);
@@ -539,14 +578,16 @@ public class Manager {
             }
         }
         if (isDownloadSuccess) {
-            // All successful callers are on transfer/preparation IO, after admission has committed.
-            // Delete promptly rather than queueing behind thousands of future admissions.
-            // Conditional identity protects a newer same-filename task; state commands only UPDATE.
-            try {
-                AppDatabase.getAppDatabase(mContext).downloadDao()
-                        .deleteDownloadingByIdentity(item.getName(), item.getUuid());
-            } catch (Throwable t) { reportPersistenceError("complete", t); }
+            queueWrites.execute(() -> {
+                try {
+                    pageQueue.committed(leases.get(item.getUuid()));
+                    AppDatabase.getAppDatabase(mContext).downloadDao()
+                            .deleteDownloadingByIdentity(item.getName(), item.getUuid());
+                } catch (Throwable t) { reportPersistenceError("complete", t); }
+            });
         }
+        // Preparation-only exits have no DownloadTask.onFinally callback.
+        if (!handles.containsKey(item.getUuid())) workerTerminated(item);
         ManagerReactive.invalidate();
     }
 
@@ -828,6 +869,7 @@ public class Manager {
             if (s == DownloadItem.DownloadState.DOWNLOADING || s == DownloadItem.DownloadState.INIT) {
                 item.setState(DownloadItem.DownloadState.INIT);
                 persistState(item);
+                queueWrites.execute(() -> pageQueue.park(item));
             }
         }
         Common.showLog("[DL-NET] parkForNetwork: 下载退回等待态，等网络恢复后自动接续");
@@ -863,7 +905,7 @@ public class Manager {
         pendingPersistence.clear();
         persistenceFailures.clear();
         queueWrites.execute(() -> {
-            try { AppDatabase.getAppDatabase(mContext).downloadDao().deleteAllDownloading(); }
+            try { pageQueue.clear(AppDatabase.getAppDatabase(mContext), Shaft.sGson); }
             catch (Throwable t) { reportPersistenceError("clear", t); }
         });
         ManagerReactive.invalidate();
@@ -925,7 +967,7 @@ public class Manager {
                 + " dispatched=" + dispatched
                 + " activeAfter=" + active);
 
-        if (active == 0 && getFirstReady() == null) {
+        if (active == 0 && getFirstReady() == null && blockedClaims.isEmpty() && pendingPersistence.isEmpty()) {
             // 没活儿了
             isRunning = false;
             Common.showLog("Manager 已经全部下载完成");
@@ -960,7 +1002,45 @@ public class Manager {
         // 兼容字段：第一个进入的当前下载 = 老 API 返回的 currentIllustID/uuid
         currentIllustID = next.getIllust().getId();
         uuid = next.getUuid();
-        downloadOne(mContext, next);
+        queueWrites.execute(() -> {
+            try {
+                synchronized (this) {
+                    if (!canContinueAttempt(next)) {
+                        dispatching.remove(next.getUuid());
+                        next.setState(DownloadItem.DownloadState.INIT);
+                        postMain(this::pumpAvailableSlots);
+                        return;
+                    }
+                }
+                int capacity = Math.max(1, Math.min(5, Shaft.sSettings.getMaxConcurrentDownloads()));
+                ceui.pixiv.download.queue.ContentQueueStore.Task lease = pageQueue.claim(next, capacity);
+                if (lease == null) {
+                    synchronized (this) {
+                        dispatching.remove(next.getUuid());
+                        next.setState(DownloadItem.DownloadState.INIT);
+                        blockedClaims.add(next.getUuid());
+                    }
+                    postMain(this::pumpAvailableSlots);
+                    return;
+                }
+                leases.put(next.getUuid(), lease);
+                postMain(() -> {
+                    synchronized (Manager.this) {
+                        if (!canContinueAttempt(next)) { workerTerminated(next); return; }
+                    }
+                    try { workerStarter.accept(next); }
+                    catch (Throwable t) { reportPersistenceError("worker start", t); complete(next, false); }
+                });
+            } catch (Throwable t) {
+                synchronized (this) {
+                    dispatching.remove(next.getUuid());
+                    next.setState(DownloadItem.DownloadState.FAILED);
+                    persistenceFailures.add(next.getUuid());
+                }
+                reportPersistenceError("claim", t);
+                postMain(this::pumpAvailableSlots);
+            }
+        });
     }
 
     /** 兼容老调用点：等价于 pumpAvailableSlots()。 */
@@ -979,7 +1059,8 @@ public class Manager {
     /** 找出可以 dispatch 的下一条：state=INIT、未暂停，且在派发范围内（见 [isDispatchable]）。 */
     private DownloadItem getFirstReady() {
         for (DownloadItem it : content) {
-            if (pendingPersistence.containsKey(it.getUuid()) || persistenceFailures.contains(it.getUuid())) continue;
+            if (pendingPersistence.containsKey(it.getUuid()) || persistenceFailures.contains(it.getUuid())
+                    || blockedClaims.contains(it.getUuid())) continue;
             if (handles.containsKey(it.getUuid()) || dispatching.contains(it.getUuid())) continue;
             if (isDispatchable(it, isRunning, releasedIllusts)
                     || (releasedPages.contains(it.getUuid()) && !it.isPaused()
@@ -1028,9 +1109,9 @@ public class Manager {
         // 所以放在它之后。这条保持 DOWNLOADING 且没有传输句柄，「全部继续」时由
         // resurrectIfStranded 复位重派。
         if (!StorageSpaceGuard.hasRoomForDownload(context)) {
-            dispatching.remove(downloadItem.getUuid());
             downloadItem.setState(DownloadItem.DownloadState.INIT);
             StorageSpaceGuard.pauseDownloadsForLowStorage(context);
+            workerTerminated(downloadItem);
             return;
         }
 
@@ -1039,6 +1120,8 @@ public class Manager {
         // SAF factory 创建、文件查询、insert 全部在 IO 线程执行，
         // 避免 172P 连续下载时 SAF 操作阻塞主线程。
         IO.execute(() -> {
+            final DownloadFileFactory[] preparing = new DownloadFileFactory[1];
+            try {
             DownloadFileFactory factory;
             try {
                 // SAF 与否只认 V3 下载配置，不读遗留 downloadWay（#984）；
@@ -1062,6 +1145,7 @@ public class Manager {
                 return;
             }
 
+            preparing[0] = factory;
             boolean shouldSkip =
                     (factory instanceof Android10DownloadFactory22 && ((Android10DownloadFactory22) factory).isSkip())
                  || (factory instanceof SAFactory && ((SAFactory) factory).isSkip());
@@ -1154,8 +1238,25 @@ public class Manager {
             }
 
             // 回主线程启动下载链（handle 赋值需要在一致的线程）
-            postMain(() ->
-                startDownloadChain(context, downloadItem, factory, targetUri, dlUrl, passSize, staged));
+            postMain(() -> {
+                try { startDownloadChain(context, downloadItem, factory, targetUri, dlUrl, passSize, staged); }
+                catch (Throwable t) {
+                    reportPersistenceError("transfer preparation", t);
+                    IO.execute(() -> {
+                        DownloadTask handle = handles.get(downloadItem.getUuid());
+                        if (handle != null) handle.cancel();
+                        else { try { factory.abandonWrite(); } catch (Exception ignored) {} }
+                        complete(downloadItem, false);
+                    });
+                }
+            });
+            } catch (Throwable t) {
+                if (preparing[0] != null) {
+                    try { preparing[0].abandonWrite(); } catch (Exception ignored) {}
+                }
+                reportPersistenceError("storage preparation", t);
+                complete(downloadItem, false);
+            }
         });
     }
 
@@ -1223,11 +1324,7 @@ public class Manager {
                 IO.execute(() -> {
                     try { factory.abandonWrite(); } catch (Exception ignored) {}
                     finally {
-                        synchronized (Manager.this) {
-                            downloadItem.setState(DownloadItem.DownloadState.INIT);
-                            dispatching.remove(downloadItem.getUuid());
-                        }
-                        postMain(this::pumpAvailableSlots);
+                        workerTerminated(downloadItem);
                     }
                 });
                 return;
