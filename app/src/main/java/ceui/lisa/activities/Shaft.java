@@ -558,6 +558,7 @@ public class Shaft extends Application implements ServicesProvider {
         ceui.pixiv.ui.novel.reader.export.QueuedNovelGroups.get(this);
         ceui.pixiv.download.copy.QueuedImageDerivatives.get(this);
         ceui.pixiv.ui.novel.reader.settings.QueuedReaderFonts.get(this);
+        ceui.pixiv.ui.detail.frames.QueuedUgoiraFrameExports.get(this);
         ceui.pixiv.ui.bulk.QueuedUgoira.get(this);
         ceui.pixiv.snapshot.QueuedSnapshots.get(this);
         ceui.pixiv.snapshot.QueuedSnapshotOperations.get(this);

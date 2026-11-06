@@ -57,6 +57,7 @@ class QueuedLocalOutputs internal constructor(private val app: Context,
     private fun directory(id: String) = File(app.filesDir, "content_local_outputs/${hash(id)}")
     fun enqueue(family: String, source: File? = null, producer: Pair<String, Consumer<File>>? = null,
         cacheReference: Closeable? = null,
+        reuseSucceeded: Boolean = false,
         request: suspend () -> LocalOutputRequest): ContentPlanTicket {
         val sourceReference = try { source?.let(CopyInputReferences::reserve) }
             catch (failed: Throwable) { cacheReference?.close(); throw failed }
@@ -66,7 +67,7 @@ class QueuedLocalOutputs internal constructor(private val app: Context,
         val token = UUID.randomUUID().toString()
         val pin = reference?.let { Pin(family, it, cacheReference != null).also { entry -> pins[token] = entry } }
         if (producer != null) producers[producer.first] = producer.second
-        val ticket = try { queue.submit(family, kind) { gson.toJson(request()) } }
+        val ticket = try { queue.submit(family, kind, reuseSucceeded = reuseSucceeded) { gson.toJson(request()) } }
         catch (failure: Throwable) { pins.remove(token)?.reference?.close(); producer?.let { producers.remove(it.first) }; throw failure }
         pin?.ticket = ticket
         scope.launch {

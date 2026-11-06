@@ -304,74 +304,17 @@ internal class UgoiraFramesViewModel(
         _clipExport.value = ClipExport.Running(0)
         viewModelScope.launch {
             val ctx = getApplication<Application>()
-            val suffix = ClipRanges.clipSuffix(range, frames.files.size)
-            // 分享副本放在 FileProvider 暴露的 images/ 里、留给接收方读；保存用的中间产物放私有缓存、拷完就删。
-            // 两者不能同名同目录：先分享、接收方还在读时再点保存，会把正在被读的文件覆盖后删掉。
-            val dir = if (share) {
-                File(ctx.externalCacheDir ?: ctx.cacheDir, "images")
-            } else {
-                File(ctx.cacheDir, "clip_export")
-            }.apply { mkdirs() }
-            val files = frames.files.subList(range.first, range.last + 1)
-            val delays = frames.delaysMs.subList(range.first, range.last + 1)
-            val job = coroutineContext[Job]
-            val progress: (Int) -> Unit = { _clipExport.value = ClipExport.Running(it) }
-            val result = runCatching {
-                var mp4 = false
-                var out: File? = null
-                if (wantMp4) {
-                    // 与播放 pipeline 共用压制闸门，见 UgoiraEngine.withVideoEncoder。mp4 编码器自己会检查取消、清 .tmp。
-                    out = UgoiraEngine.withVideoEncoder {
-                        UgoiraVideoEncoder.encode(File(dir, "${target.id}$suffix.mp4"), files, delays, progress)
-                    }
-                    mp4 = out != null
+            _clipExport.value = try {
+                val receipt = QueuedUgoiraFrameExports.get(ctx).clip(target, frames, range, share, wantMp4, offlineDir) {
+                    _clipExport.value = ClipExport.Running(it)
                 }
-                if (out == null) {
-                    val gif = File(dir, "${target.id}$suffix.gif")
-                    out = gif
-                    withContext(Dispatchers.IO) {
-                        try {
-                            BufferedOutputStream(FileOutputStream(gif)).use { stream ->
-                                encodeFramesToGif(files, delays, stream) {
-                                    // GIF 编码器是纯阻塞循环：离开页面后在这里停下，别再白烧几秒 CPU。
-                                    job?.ensureActive()
-                                    progress(it)
-                                }
-                            }
-                        } catch (t: Throwable) {
-                            // 半截 GIF 不能留在缓存里（分享目录还会被 FileProvider 暴露出去）。
-                            gif.delete()
-                            throw t
-                        }
-                    }
-                }
-                val mime = if (mp4) "video/mp4" else "image/gif"
-                if (share) {
-                    ClipExport.Shared(FileProvider.getUriForFile(ctx, "${ctx.packageName}.provider", out), mime)
-                } else {
-                    withContext(Dispatchers.IO) {
-                        try {
-                            val handle = DownloadsRegistry.downloads.openDerived(DownloadItems.ugoira(target, mp4), suffix)
-                            if (handle != null) {
-                                try {
-                                    handle.stream.use { s -> out.inputStream().use { it.copyTo(s) } }
-                                    handle.onFinish()
-                                } catch (t: Throwable) {
-                                    handle.onAbort()
-                                    throw t
-                                }
-                            }
-                        } finally {
-                            out.delete()
-                        }
-                    }
-                    ClipExport.Saved(fellBackToGif = wantMp4 && !mp4)
-                }
-            }
-            _clipExport.value = result.getOrElse {
-                if (it is CancellationException) throw it
-                Timber.tag(UGOIRA_LOG_TAG).w(it, "[frames] illust=%d 片段导出失败 %s", target.id, suffix)
-                ClipExport.Failed(it.message ?: it.javaClass.simpleName)
+                if (share) ClipExport.Shared(FileProvider.getUriForFile(ctx, "${ctx.packageName}.provider",
+                    File(requireNotNull(Uri.parse(requireNotNull(receipt.uri)).path))), receipt.mime)
+                else ClipExport.Saved(fellBackToGif = wantMp4 && receipt.mime != "video/mp4")
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (error: Throwable) {
+                Timber.tag(UGOIRA_LOG_TAG).w(error, "Frame clip export failed")
+                ClipExport.Failed(error.message ?: error.javaClass.simpleName)
             }
         }
     }
@@ -386,23 +329,8 @@ internal class UgoiraFramesViewModel(
     suspend fun save(indices: List<Int>): Int {
         val frames = ready ?: error("frames not ready")
         val target = illust ?: error("illust not bound")
-        return withContext(Dispatchers.IO) {
-            indices.count { i ->
-                // open 返回 null = 用户选了「跳过已存在」且同名文件在：算已保存。
-                val handle = DownloadsRegistry.downloads.openDerived(
-                    DownloadItems.ugoiraFrame(target),
-                    ClipRanges.frameSuffix(i, frames.files.size),
-                ) ?: return@count true
-                try {
-                    handle.stream.use { out -> frames.files[i].inputStream().use { it.copyTo(out) } }
-                    handle.onFinish()
-                    true
-                } catch (t: Throwable) {
-                    handle.onAbort()
-                    throw t
-                }
-            }
-        }
+        return QueuedUgoiraFrameExports.get(getApplication<Application>())
+            .frames(target, frames, indices, false, offlineDir).size
     }
 
     /** 分享用副本：拷进 FileProvider 暴露的缓存目录，文件名带帧序号。 */
@@ -410,13 +338,9 @@ internal class UgoiraFramesViewModel(
         val frames = ready ?: error("frames not ready")
         val target = illust ?: error("illust not bound")
         val ctx = getApplication<Application>()
-        return withContext(Dispatchers.IO) {
-            val dir = File(ctx.externalCacheDir ?: ctx.cacheDir, "images").apply { mkdirs() }
-            indices.mapTo(ArrayList()) { i ->
-                val out = File(dir, "${target.id}${ClipRanges.frameSuffix(i, frames.files.size)}.jpg")
-                frames.files[i].copyTo(out, overwrite = true)
-                FileProvider.getUriForFile(ctx, "${ctx.packageName}.provider", out)
-            }
+        val receipts = QueuedUgoiraFrameExports.get(ctx).frames(target, frames, indices, true, offlineDir)
+        return receipts.mapTo(ArrayList()) { receipt ->
+            FileProvider.getUriForFile(ctx, "${ctx.packageName}.provider", File(requireNotNull(Uri.parse(requireNotNull(receipt.uri)).path)))
         }
     }
 
@@ -438,3 +362,4 @@ internal class UgoiraFramesViewModel(
         private const val KEY_CLIP_MP4 = "clip_mp4"
     }
 }
+

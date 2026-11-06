@@ -97,6 +97,15 @@ public final class AppApiGsonR8InstrumentedTest {
         assertEquals("accepted-hash", frozen.getString("sha256"));
         assertEquals(1234L, frozen.getLong("bytes"));
     }
+    @Test
+    public void selectedFrameReceiptsKeepOriginalInputsAndOwnedChildIds() throws Exception {
+        Object checkpoint = parseWire(ceui.pixiv.ui.detail.frames.FrameExportState.class,
+                "{\"version\":1,\"inputs\":[{\"name\":\"0.jpg\",\"bytes\":123,\"sha256\":\"frozen\"}],\"outputs\":[{\"uri\":\"content://images/1\",\"mime\":\"image/jpeg\",\"skipped\":false,\"child\":\"plan:owned-child\"}],\"video\":false,\"complete\":true}");
+        JSONObject saved = new JSONObject(encodeWire(checkpoint));
+        assertEquals("0.jpg", saved.getJSONArray("inputs").getJSONObject(0).getString("name"));
+        assertEquals("plan:owned-child", saved.getJSONArray("outputs").getJSONObject(0).getString("child"));
+        assertTrue(saved.getBoolean("complete"));
+    }
 
     @Test
     public void snapshotManagementIntentAndValidatedInputKeepTheirSchemaInRelease() throws Exception {
