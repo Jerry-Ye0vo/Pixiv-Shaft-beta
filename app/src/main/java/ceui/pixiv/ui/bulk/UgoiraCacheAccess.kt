@@ -8,43 +8,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
-/** A cache clear waits outside physical pools; active pipelines/exports keep their directory lease. */
-internal class UgoiraCacheGate {
-    private val lock = Any()
-    private val writer = Mutex()
-    private var readers = 0
-    private var clearing = false
-    private var changed = CompletableDeferred<Unit>()
-    private class ReadLease(val gate: UgoiraCacheGate) : kotlin.coroutines.AbstractCoroutineContextElement(Key) {
-        companion object Key : kotlin.coroutines.CoroutineContext.Key<ReadLease>
-    }
-    private fun signal() { changed.complete(Unit); changed = CompletableDeferred() }
-    suspend fun <T> read(block: suspend () -> T): T {
-        if (currentCoroutineContext()[ReadLease]?.gate === this) return block()
-        while (true) {
-            currentCoroutineContext().ensureActive()
-            val wait = synchronized(lock) {
-                if (!clearing) { readers++; null } else changed
-            }
-            if (wait == null) break
-            wait.await()
-        }
-        try { return withContext(ReadLease(this)) { block() } }
-        finally { synchronized(lock) { readers--; check(readers >= 0); signal() } }
-    }
-    suspend fun <T> clear(block: suspend () -> T): T = writer.withLock {
-        check(currentCoroutineContext()[ReadLease]?.gate !== this) { "A cache reader cannot await its own deletion" }
-        synchronized(lock) { clearing = true; signal() }
-        try {
-            while (true) {
-                val wait = synchronized(lock) { if (readers == 0) null else changed }
-                if (wait == null) break
-                wait.await()
-            }
-            block()
-        } finally { synchronized(lock) { clearing = false; signal() } }
-    }
-}
+/** Shared directory gate; compatibility name keeps the existing cache regression suite. */
+internal typealias UgoiraCacheGate = ceui.pixiv.download.queue.ContentResourceGate
 
 object UgoiraCacheAccess {
     private val gate = UgoiraCacheGate()

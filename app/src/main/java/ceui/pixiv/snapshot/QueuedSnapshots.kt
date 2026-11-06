@@ -59,22 +59,27 @@ class QueuedSnapshots internal constructor(private val app: Context,
         val request = request(context.plan)
         val illust = gson.fromJson(request.illustJson, Illust::class.java)
         require(illust.id > 0)
-        val session = SnapshotPlanSession(context, request, app, phases, transfers)
-        session.sweepInterruptedWrites()
-        if (session.recoverManifest()) return
-        if (!manual.contains(context.plan.family) && !allowed()) { session.forgetManifest(); context.yieldForPolicy() }
-        withContext(SnapshotPlanSession.current.asContextElement(session)) {
-            generate(request, illust) { context.progress(it) }
+        ContentResourceLeases.write("snapshot:${request.snapshotId}") {
+            val session = SnapshotPlanSession(context, request, app, phases, transfers)
+            session.sweepInterruptedWrites()
+            if (!session.recoverManifest()) {
+                if (!manual.contains(context.plan.family) && !allowed()) { session.forgetManifest(); context.yieldForPolicy() }
+                withContext(SnapshotPlanSession.current.asContextElement(session)) {
+                    generate(request, illust) { context.progress(it) }
+                }
+            }
         }
     }
     override suspend fun cleanup(plan: ContentPlanStore.Plan, state: State) {
         if (state != State.CANCELLED) return
         val request = request(plan)
+        ContentResourceLeases.write("snapshot:${request.snapshotId}") {
         phases.run(plan.id, "snapshot-cleanup", "snapshot-manifest:${request.snapshotId}", Pool.COPY) {
             val directory = SnapshotRepository.dir(app, request.snapshotId)
             // A complete manifest is already an externally visible snapshot, never a retry input.
             val manifest = File(directory, if (request.automatic) AUTO_SNAPSHOT_MANIFEST else SNAPSHOT_MANIFEST)
             if (!manifest.isFile && directory.exists() && !directory.deleteRecursively()) throw IOException("Cannot remove cancelled snapshot input")
+        }
         }
     }
     companion object {

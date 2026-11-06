@@ -57,6 +57,22 @@ import retrofit2.http.GET;
 public final class AppApiGsonR8InstrumentedTest {
 
     @Test
+    public void snapshotManagementIntentAndValidatedInputKeepTheirSchemaInRelease() throws Exception {
+        Object request = parseWire(ceui.pixiv.snapshot.SnapshotOperationRequest.class,
+                "{\"version\":1,\"operation\":\"export\",\"snapshotId\":\"snapshot-123\",\"uri\":\"content://documents/output/1\",\"fileName\":\"frozen.shaftsnap\",\"manifestHash\":\"hash\"}");
+        JSONObject frozen = new JSONObject(encodeWire(request));
+        assertEquals("export", frozen.getString("operation"));
+        assertEquals("content://documents/output/1", frozen.getString("uri"));
+        assertEquals("frozen.shaftsnap", frozen.getString("fileName"));
+        Object checkpoint = parseWire(ceui.pixiv.snapshot.SnapshotOperationState.class,
+                "{\"version\":1,\"manifestJson\":\"{}\",\"files\":{\"images/p0.jpg\":{\"identity\":\"import\",\"bytes\":123,\"sha256\":\"hash\"}},\"prepared\":true,\"existed\":true}");
+        JSONObject saved = new JSONObject(encodeWire(checkpoint));
+        assertTrue(saved.getBoolean("prepared"));
+        assertTrue(saved.getBoolean("existed"));
+        assertEquals(123L, saved.getJSONObject("files").getJSONObject("images/p0.jpg").getLong("bytes"));
+    }
+
+    @Test
     public void snapshotParentResourcesAndFrozenIdentityKeepTheirSchemaInRelease() throws Exception {
         Object request = parseWire(ceui.pixiv.snapshot.SnapshotRequest.class,
                 "{\"version\":1,\"snapshotId\":\"12345678-1234-1234-1234-123456789abc\",\"createdAt\":12345,\"illustJson\":\"{}\",\"comments\":true,\"original\":true,\"fresh\":true,\"automatic\":false}");

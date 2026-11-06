@@ -81,7 +81,7 @@ class ContentPhaseRunner(
 /** Adapters share the existing process recovery owner and SQLite permit authority. */
 object ContentPhases {
     fun runner(context: Context): ContentPhaseRunner = ContentPhaseRunner(ContentQueueRuntime.get(context)) { pool ->
-        if (pool == Pool.ENCODE) 1 else Shaft.sSettings.maxConcurrentDownloads
+        if (pool == Pool.ENCODE) 1 else Shaft.sSettings?.maxConcurrentDownloads ?: 1
     }
     suspend fun <T> run(owner: String, phase: String, resource: String, pool: Pool,
                         context: String = "{}", block: suspend () -> T): T =
