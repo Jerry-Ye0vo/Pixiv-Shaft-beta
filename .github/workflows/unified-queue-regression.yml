@@ -61,6 +61,10 @@ jobs:
           rows = []
           for path in sorted(Path('app/build/test-results').rglob('TEST-*.xml')):
               root = ET.parse(path).getroot()
+              for case in root.findall('testcase'):
+                  for problem in list(case.findall('failure')) + list(case.findall('error')):
+                      print(f"FAILED {root.attrib.get('name')} :: {case.attrib.get('name')}")
+                      print((problem.text or problem.attrib.get('message', ''))[:16000])
               rows.append((root.attrib.get('name', path.stem), *(int(root.attrib.get(k, 0)) for k in ('tests', 'failures', 'errors', 'skipped'))))
           totals = [sum(row[i] for row in rows) for i in range(1, 5)]
           report = ['| Suite | Tests | Failures | Errors | Skipped |', '| --- | ---: | ---: | ---: | ---: |']

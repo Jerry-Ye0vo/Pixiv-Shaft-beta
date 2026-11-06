@@ -10,7 +10,7 @@ import ceui.pixiv.imageloader.ImageFetcher
 import ceui.pixiv.imageloader.OriginalTransferQueue
 import com.google.gson.Gson
 import kotlinx.coroutines.*
-import okio.ByteString
+import okio.ByteString.Companion.encodeUtf8
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -67,7 +67,7 @@ class PageSharedSourceTest {
         owner.admit(db, gson, task)
         val id = PageQueueOwner.id(task)
         val before = owner.store.get(id)
-        val oldResource = "pixiv-bytes:" + ByteString.encodeUtf8(task.url).sha256().hex()
+        val oldResource = "pixiv-bytes:" + task.url.encodeUtf8().sha256().hex()
         owner.store.rebindWaiting(id, before.outputKey, before.resourceKey, oldResource, Pool.NETWORK)
         db.downloadDao().deleteAllDownloading() // recovery cannot depend solely on the compatibility mirror
         val restored = owner.restore(db, gson).single()
@@ -80,7 +80,7 @@ class PageSharedSourceTest {
         val task = item()
         owner.admit(db, gson, task)
         val before = owner.store.get(PageQueueOwner.id(task))
-        val old = "pixiv-bytes:" + ByteString.encodeUtf8(task.url).sha256().hex()
+        val old = "pixiv-bytes:" + task.url.encodeUtf8().sha256().hex()
         owner.store.rebindWaiting(before.id, before.outputKey, before.resourceKey, old, Pool.NETWORK)
         val running = owner.store.claim(before.id, Pool.NETWORK, 1)
         try {

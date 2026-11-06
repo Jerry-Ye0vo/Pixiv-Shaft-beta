@@ -8,9 +8,11 @@ import kotlinx.coroutines.flow.update
 
 /** One recovery authority for every adapter using content_queue.db in this process. IO only. */
 class ContentQueueRuntime(context: Context, name: String) : java.io.Closeable {
-    val store = ContentQueueStore(context, name)
+    private val application = context.applicationContext
+    val store = ContentQueueStore(application, name)
     private var recovered = false
     private val signal = MutableStateFlow(0L)
+    private val listeners = java.util.concurrent.CopyOnWriteArrayList<Runnable>()
     val changes: StateFlow<Long> = signal.asStateFlow()
 
     @Synchronized fun initialize() {
@@ -19,13 +21,28 @@ class ContentQueueRuntime(context: Context, name: String) : java.io.Closeable {
             recovered = true
         }
     }
-    fun changed() { signal.update { it + 1 } }
-    override fun close() { store.close() }
+    fun addListener(listener: Runnable) { listeners.add(listener) }
+    fun changed() {
+        signal.update { it + 1 }
+        listeners.forEach { listener ->
+            try { listener.run() }
+            catch (error: Exception) { timber.log.Timber.tag("ContentQueue").w(error, "Queue wake-up failed") }
+        }
+    }
+    override fun close() {
+        listeners.clear()
+        store.close()
+        synchronized(Companion) { if (instance === this) instance = null }
+    }
 
     companion object {
         @Volatile private var instance: ContentQueueRuntime? = null
-        @JvmStatic fun get(context: Context): ContentQueueRuntime = instance ?: synchronized(this) {
-            instance ?: ContentQueueRuntime(context.applicationContext, "content_queue.db").also { instance = it }
+        @JvmStatic fun get(context: Context): ContentQueueRuntime {
+            val application = context.applicationContext
+            return instance?.takeIf { it.application === application } ?: synchronized(this) {
+                instance?.takeIf { it.application === application }
+                    ?: ContentQueueRuntime(application, "content_queue.db").also { instance = it }
+            }
         }
     }
 }

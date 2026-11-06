@@ -291,6 +291,10 @@ public class Manager {
     private Manager() {
         uuid = "";
         currentIllustID = 0;
+        ceui.pixiv.download.queue.ContentQueueRuntime.get(mContext).addListener(() -> postMain(() -> {
+            synchronized (Manager.this) { blockedClaims.clear(); }
+            pumpAvailableSlots();
+        }));
         IO.execute(() -> PageQueueDiagnostics.previousExits(mContext));
     }
 

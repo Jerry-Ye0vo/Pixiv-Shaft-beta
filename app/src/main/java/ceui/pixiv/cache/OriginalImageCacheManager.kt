@@ -153,12 +153,26 @@ object OriginalImageCacheManager {
         }
     }
 
+    private val trimLock = Any()
+    private val trimRequests = linkedMapOf<File, Int>()
+    private var trimScheduled = false
+
+    /** Coalesce releases/commits: one IO scanner, with a follow-up pass if pins change mid-scan. */
     private fun trimDirAsync(cacheDir: File, maxMb: Int) {
+        synchronized(trimLock) {
+            trimRequests[cacheDir] = maxMb
+            if (trimScheduled) return
+            trimScheduled = true
+        }
         scope.launch {
-            try {
-                trimDir(cacheDir, OriginalImageCacheQuota.maxBytesForLimit(maxMb))
-            } catch (e: Throwable) {
-                Timber.w(e, "[OriginalCache] async trim failed")
+            while (true) {
+                val request = synchronized(trimLock) {
+                    val next = trimRequests.entries.firstOrNull()
+                    if (next == null) { trimScheduled = false; null }
+                    else (next.key to next.value).also { trimRequests.remove(next.key) }
+                } ?: return@launch
+                try { trimDir(request.first, OriginalImageCacheQuota.maxBytesForLimit(request.second)) }
+                catch (error: Exception) { Timber.w(error, "[OriginalCache] async trim failed") }
             }
         }
     }

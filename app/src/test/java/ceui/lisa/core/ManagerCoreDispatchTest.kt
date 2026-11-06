@@ -118,4 +118,17 @@ class ManagerCoreDispatchTest {
         assertNotNull(db.downloadDao().getDownloadingByFileName(a.name))
     }
 
+    @Test fun releasedCapacityInAnotherAdapterWakesBlockedPageClaims() {
+        val a = item(1)
+        manager.addTask(a); cycle()
+        val other = owner.store.enqueue("other-output", "other-source", ceui.pixiv.download.queue.ContentQueueStore.Pool.COPY, "other")
+        val held = owner.store.claim(other, ceui.pixiv.download.queue.ContentQueueStore.Pool.COPY, 1)
+        manager.startOne(a.uuid); cycle()
+        assertTrue(started.isEmpty())
+        owner.store.finish(other, held.attempt, true, null)
+        ceui.pixiv.download.queue.ContentQueueRuntime.get(RuntimeEnvironment.getApplication()).changed()
+        cycle()
+        assertEquals(listOf(a), started)
+    }
+
 }

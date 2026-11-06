@@ -5,6 +5,7 @@ import ceui.pixiv.download.queue.ContentQueueRuntime
 import ceui.pixiv.download.queue.ContentQueueStore.Pool
 import ceui.pixiv.download.queue.ContentQueueStore.State
 import kotlinx.coroutines.*
+import okio.ByteString.Companion.encodeUtf8
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -50,18 +51,20 @@ class OriginalTransferQueueTest {
     private suspend fun eventually(condition: () -> Boolean) = withTimeout(5_000) {
         while (!condition()) delay(10)
     }
-    private fun taskId(url: String) = "original:" + okio.ByteString.encodeUtf8(url).sha256().hex()
+    private fun taskId(url: String) = "original:" + url.encodeUtf8().sha256().hex()
 
     @Test fun viewAndSaveShareOneActualHttpTransferAndCancellationIsConsumerScoped() = runBlocking {
         val server = MockWebServer()
         server.start()
+        val releaseBody = CompletableDeferred<Unit>()
         try {
-            server.enqueue(MockResponse().setBody("actual image bytes").setBodyDelay(150, java.util.concurrent.TimeUnit.MILLISECONDS))
+            server.enqueue(MockResponse().setBody("actual image bytes"))
             val cache = mutableMapOf<String, File>()
             val network = object : ImageFetcher {
                 override suspend fun fetch(url: String, onProgress: (Int) -> Unit): File = withContext(Dispatchers.IO) {
                     assertEquals(State.RUNNING, runtime.store.get(taskId(url)).state)
                     OkHttpClient().newCall(okhttp3.Request.Builder().url(url).build()).execute().use {
+                        releaseBody.await()
                         File(dir, "http.jpg").apply { writeBytes(it.body!!.bytes()); synchronized(cache) { cache[url] = this } }
                     }
                 }
@@ -74,11 +77,12 @@ class OriginalTransferQueueTest {
             val save = async { q.acquire(url, { attached.complete(Unit) }, saving = true) }
             withTimeout(5_000) { attached.await() }
             view.cancelAndJoin()
+            releaseBody.complete(Unit)
             save.await().use { assertEquals("actual image bytes", it.file.readText()) }
             assertEquals(1, server.requestCount)
             q.acquire(url, {}).close() // cache hit does not enqueue or fetch
             assertEquals(1, server.requestCount)
-        } finally { server.shutdown() }
+        } finally { releaseBody.complete(Unit); server.shutdown() }
     }
 
     @Test fun fullNetworkCapacityWaitsWithoutStartingAnyTransport() = runBlocking {

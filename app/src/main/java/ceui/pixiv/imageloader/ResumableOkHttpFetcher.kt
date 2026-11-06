@@ -86,6 +86,10 @@ class ResumableOkHttpFetcher(
             manifest = null
         }
 
+        if (manifest != null && manifest.url == url && manifest.total > 0 && existingLen == manifest.total) {
+            return@withContext OriginalImageCacheManager.commit(cacheDir, stagingDir, url, partFile)
+        }
+
         val networkUrl = ImageHostManager.rewrite(url)
         val pixivHeaders = PixivHeaders()
 

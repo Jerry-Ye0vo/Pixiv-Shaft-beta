@@ -128,7 +128,7 @@ class ResumableOkHttpFetcherTest {
         val metaFile = StageStore.metaFile(stagingDir, key)
 
         FileOutputStream(partFile).use { it.write(payload) }
-        StageStore.writeManifest(metaFile, StageStore.buildManifest(url, etag, null, 1000L))
+        StageStore.writeManifest(metaFile, StageStore.buildManifest(url, etag, null, -1L))
 
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
@@ -203,7 +203,7 @@ class ResumableOkHttpFetcherTest {
         assertTrue(partFile.exists())
         assertTrue(partFile.length() in 1..400)
     }
-    @Test fun `validated legacy partial is adopted with its validator and survives failed adoption`() = runTest {
+    @Test fun `validated legacy partial is adopted with its validator and original recovery file intact`() = runTest {
         val legacy = File.createTempFile("legacy-stage-", "dir").apply { delete(); mkdirs() }
         val url = testUrl()
         val key = StageStore.keyForUrl(url)
@@ -234,6 +234,16 @@ class ResumableOkHttpFetcherTest {
             testFetcher().adoptLegacyStage(url, stagingDir, legacy)
             assertFalse(StageStore.partFile(stagingDir, key).exists())
         } finally { legacy.deleteRecursively() }
+    }
+
+    @Test fun `complete validated stage commits offline without another HTTP request`() = runTest {
+        val url = testUrl()
+        val key = StageStore.keyForUrl(url)
+        StageStore.partFile(stagingDir, key).writeBytes(payload)
+        StageStore.writeManifest(StageStore.metaFile(stagingDir, key), StageStore.buildManifest(url, etag, null, 1000))
+        val result = testFetcher().fetch(url) {}
+        assertArrayEquals(payload, result.readBytes())
+        assertEquals(0, server.requestCount)
     }
 
 }

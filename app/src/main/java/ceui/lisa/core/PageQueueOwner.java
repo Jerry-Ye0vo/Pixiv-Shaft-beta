@@ -162,5 +162,5 @@ final class PageQueueOwner implements java.io.Closeable {
         return true;
     }
 
-    @Override public void close() { store.close(); }
+    @Override public void close() { runtime.close(); }
 }

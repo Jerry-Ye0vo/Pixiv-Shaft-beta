@@ -10,7 +10,7 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import okio.ByteString
+import okio.ByteString.Companion.encodeUtf8
 import java.io.Closeable
 import java.io.File
 import java.io.IOException
@@ -119,7 +119,7 @@ internal class OriginalTransferQueue(
             // A preceding transfer or another consumer may have populated the cache while queuing.
             val already = cached(url)?.takeIf { it.isFile && it.length() > 0 }
             if (already != null) { flight.result.complete(already); return }
-            val digest = ByteString.encodeUtf8(url).sha256().hex()
+            val digest = url.encodeUtf8().sha256().hex()
             taskId = "original:$digest"
             runtime.store.admit(taskId, "original-cache:$digest", "pixiv-bytes:$digest",
                 Pool.NETWORK, url, State.QUEUED, false)
