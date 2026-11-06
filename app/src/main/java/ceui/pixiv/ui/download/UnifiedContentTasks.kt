@@ -51,6 +51,7 @@ internal class UnifiedContentTasks(context: Context) {
         val json = runCatching { JSONObject(plan?.request ?: "{}") }.getOrDefault(JSONObject())
         val category = when (status.kind) {
             "novel-export", "novel-series-group" -> "小说"
+            "image-derivative" -> "图片导出"
             "ugoira-export" -> "动图"
             "model-install" -> "模型"
             else -> when { status.kind.contains("snapshot") -> "离线快照"

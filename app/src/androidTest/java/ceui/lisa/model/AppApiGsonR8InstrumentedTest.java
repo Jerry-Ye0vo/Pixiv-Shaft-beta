@@ -79,6 +79,15 @@ public final class AppApiGsonR8InstrumentedTest {
         assertEquals("Epub", state.getSelectedFormat());
         assertTrue(gson.toJson(state).contains("\"txtHeader\""));
     }
+    @Test
+    public void imageDerivativeRecipeKeepsItsFrozenSourceAndFilterInRelease() throws Exception {
+        Object recipe = parseWire(ceui.pixiv.download.copy.ImageDerivativeState.class,
+                "{\"version\":1,\"sourceHash\":\"frozen-sha\",\"sourceBytes\":123,\"avatarAttempted\":true,\"mime\":\"image/png\"}");
+        JSONObject saved = new JSONObject(encodeWire(recipe));
+        assertEquals("frozen-sha", saved.getString("sourceHash"));
+        assertEquals(123L, saved.getLong("sourceBytes"));
+        assertEquals("image/png", saved.getString("mime"));
+    }
 
     @Test
     public void snapshotManagementIntentAndValidatedInputKeepTheirSchemaInRelease() throws Exception {

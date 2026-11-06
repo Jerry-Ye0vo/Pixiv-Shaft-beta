@@ -44,10 +44,9 @@ object WallpaperSetter {
             Common.showToast(R.string.string_set_wallpaper_failed)
             return
         }
-        val file =
+        val prepared =
             try {
-                PageImageSourceResolver.resolve(activity, illust, pageIndex, imageUrl)
-                    .awaitFile(activity)
+                ceui.pixiv.download.copy.QueuedImageDerivatives.get(activity).wallpaper(illust, pageIndex)
             } catch (e: CancellationException) {
                 // 页面销毁导致协程取消:重抛,别把「取消」当成加载失败弹 toast
                 throw e
@@ -55,32 +54,18 @@ object WallpaperSetter {
                 Timber.w(e, "[Wallpaper] load image failed url=%s", imageUrl)
                 null
             }
-        if (file == null) {
+        if (prepared == null) {
             Common.showToast(R.string.string_set_wallpaper_failed)
             return
         }
         val uri = runCatching {
-            withContext(Dispatchers.IO) { copyToShareCache(activity, file, imageUrl) }
+            FileProvider.getUriForFile(activity, "${activity.packageName}.provider", File(requireNotNull(prepared.uri.path)))
         }.getOrElse { ex ->
             Timber.w(ex, "[Wallpaper] prepare uri failed id=%d page=%d", illust.id, pageIndex)
             Common.showToast(R.string.string_set_wallpaper_failed)
             return
         }
         applyUri(activity, uri)
-    }
-
-    private fun copyToShareCache(activity: Activity, source: File, imageUrl: String): Uri {
-        val dir = File(activity.cacheDir, CACHE_DIR).apply {
-            mkdirs()
-            listFiles()?.forEach { it.delete() }
-        }
-        // 扩展名跟着原图走(jpg/png),系统裁剪器按 MIME 嗅探,名字对上更稳。
-        val ext = imageUrl.substringAfterLast('.', "jpg").substringBefore('?').take(4)
-        val target = File(dir, "wallpaper_from_shaft.$ext")
-        source.inputStream().use { input ->
-            target.outputStream().use { input.copyTo(it) }
-        }
-        return FileProvider.getUriForFile(activity, "${activity.packageName}.provider", target)
     }
 
     private suspend fun applyUri(activity: Activity, uri: Uri) {
@@ -127,3 +112,4 @@ object WallpaperSetter {
         )
     }
 }
+
