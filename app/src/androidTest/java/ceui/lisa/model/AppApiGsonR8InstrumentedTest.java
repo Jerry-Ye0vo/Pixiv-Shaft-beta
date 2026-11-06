@@ -57,6 +57,23 @@ import retrofit2.http.GET;
 public final class AppApiGsonR8InstrumentedTest {
 
     @Test
+    public void novelExportTokensAndArtifactReceiptsKeepTheirSchemaInRelease() throws Exception {
+        Object request = parseWire(ceui.pixiv.ui.novel.reader.export.NovelExportRequest.class,
+                "{\"version\":1,\"format\":\"Txt\",\"novelId\":123,\"tokens\":[{\"type\":\"paragraph\",\"start\":0,\"end\":4,\"text\":\"body\",\"id\":0,\"page\":0}],\"destination\":{\"storage\":\"cache\",\"segments\":[\"book.txt\"],\"mime\":\"text/plain\",\"policy\":\"Rename\"},\"header\":\"frozen\",\"legacyTxt\":false,\"retryMode\":\"auto\"}");
+        JSONObject frozen = new JSONObject(encodeWire(request));
+        assertEquals(123L, frozen.getLong("novelId"));
+        assertEquals("paragraph", frozen.getJSONArray("tokens").getJSONObject(0).getString("type"));
+        assertEquals("body", frozen.getJSONArray("tokens").getJSONObject(0).getString("text"));
+        assertEquals("frozen", frozen.getString("header"));
+        Object receipt = parseWire(ceui.pixiv.download.queue.ArtifactCheckpoint.class,
+                "{\"version\":1,\"bytes\":123,\"sha256\":\"hash\",\"receipt\":\"content://output/1\",\"skipped\":false,\"outputCommitted\":true,\"domain\":\"checkpoint\"}");
+        JSONObject saved = new JSONObject(encodeWire(receipt));
+        assertEquals("content://output/1", saved.getString("receipt"));
+        assertEquals("hash", saved.getString("sha256"));
+        assertTrue(saved.getBoolean("outputCommitted"));
+    }
+
+    @Test
     public void modelParentAndInstallationReceiptsKeepTheirSchemaInRelease() throws Exception {
         Object request = parseWire(ceui.pixiv.download.model.ModelRequest.class,
                 "{\"version\":1,\"directory\":\"rife-models\",\"asset\":\"rife\",\"required\":[\"model.onnx\"],\"operation\":\"download\",\"source\":\"https://example.com/model.zip\",\"timeoutSeconds\":120}");

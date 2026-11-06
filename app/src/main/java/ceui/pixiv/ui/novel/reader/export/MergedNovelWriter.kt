@@ -146,7 +146,13 @@ object MergedNovelWriters {
         ExportFormat.Epub to MergedEpubWriter,
     )
 
-    fun forFormat(format: ExportFormat): MergedNovelWriter = writers.getValue(format)
+    internal fun raw(format: ExportFormat): MergedNovelWriter = writers.getValue(format)
+    fun forFormat(format: ExportFormat): MergedNovelWriter = object : MergedNovelWriter {
+        override val format = format
+        override suspend fun write(context: Context, content: MergedNovelContent, destination: RelativePath,
+            retryPolicy: EpubImageRetryPolicy, onImageBundled: suspend (String, Int) -> Unit): Boolean =
+            QueuedNovelExports.get(context).merged(format, content, destination, retryPolicy, onImageBundled)
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -281,6 +287,7 @@ private object MergedPdfWriter : MergedNovelWriter {
 
         val document = PdfDocument()
         val state = PageState()
+        try {
         state.start(document)
 
         // Cover block (drawn once at the top of page 1).
@@ -326,8 +333,10 @@ private object MergedPdfWriter : MergedNovelWriter {
         val uri = ExportUtils.saveToDownloads(context, destination, format.mimeType, Bucket.NovelSeries) { out ->
             document.writeTo(out)
         }
-        document.close()
         return uri != null
+        } finally {
+            try { state.finish(document) } finally { document.close() }
+        }
     }
 
     /** Drawing cursor shared between the cover block, chapter heads, and paragraph flow. */
@@ -509,7 +518,7 @@ private object MergedEpubWriter : MergedNovelWriter {
             }
         }
 
-        if (failedImages.isNotEmpty()) {
+        if (failedImages.isNotEmpty() && retryPolicy !is EpubImageRetryPolicy.Auto) {
             val act = (retryPolicy as? EpubImageRetryPolicy.Batch)?.activity
                 ?: (retryPolicy as? EpubImageRetryPolicy.Foreground)?.activity
                 ?: com.blankj.utilcode.util.ActivityUtils.getTopActivity()
@@ -761,3 +770,4 @@ $body
 </container>
 """
 }
+

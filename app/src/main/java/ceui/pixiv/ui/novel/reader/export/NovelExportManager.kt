@@ -35,6 +35,8 @@ object NovelExportManager {
         ExportFormat.Pdf to PdfExporter(),
     )
 
+    internal fun raw(format: ExportFormat): NovelExporter = exporters.getValue(format)
+
     /**
      * 解析「默认小说下载格式」设置。
      *
@@ -85,8 +87,6 @@ object NovelExportManager {
                 extOverride = format.extension,
             )
         }
-        val exporter = exporters[format]
-            ?: return@withContext ExportResult.Failure(context.getString(ceui.lisa.R.string.msg_unknown_format, context.getString(format.displayNameResId)))
         val effectivePolicy = retryPolicy ?: if (com.blankj.utilcode.util.AppUtils.isAppForeground()) {
             EpubImageRetryPolicy.Foreground(context as? android.app.Activity)
         } else {
@@ -96,7 +96,7 @@ object NovelExportManager {
         // ExportResult.Failure 弹「Job was cancelled」给用户(单本导出场景同样
         // 受影响)。改成手写 try/catch,显式重抛 CE。
         val result = try {
-            exporter.export(context, novel, webNovel, tokens, destination, effectivePolicy)
+            QueuedNovelExports.get(context).single(format, novel, webNovel, tokens, destination, effectivePolicy)
         } catch (ce: CancellationException) {
             throw ce
         } catch (t: Throwable) {
@@ -106,9 +106,6 @@ object NovelExportManager {
             // hiding behind a one-line message.
             Timber.e(t, "novel export failed: format=$format id=${novel?.id} dest=${destination.joinTo()}")
             ExportResult.Failure(t.message ?: "导出失败", t)
-        }
-        if (result is ExportResult.Success && novel != null) {
-            recordDownload(novel, result.uri)
         }
         result
     }
@@ -121,7 +118,10 @@ object NovelExportManager {
     private suspend fun seriesOrderOf(novel: Novel): Int? {
         val seriesId = novel.series?.id?.takeIf { it > 0 } ?: return null
         return try {
-            SeriesCache.novelPositionInSeries(seriesId, novel.id)
+            ceui.pixiv.download.queue.ContentPhases.run("novel-export", "series-position", "novel-series:$seriesId",
+                ceui.pixiv.download.queue.ContentQueueStore.Pool.NETWORK) {
+                SeriesCache.novelPositionInSeries(seriesId, novel.id)
+            }
         } catch (ce: CancellationException) {
             throw ce
         } catch (t: Throwable) {
@@ -136,15 +136,14 @@ object NovelExportManager {
     // 批量下载的 TXT 分支自己落盘，也走这里记账（issue #1274）。
     internal fun recordDownload(novel: Novel, uri: Uri) {
         val id = novel.id
-        runCatching {
-            val entity = DownloadEntity().apply {
+        val entity = DownloadEntity().apply {
                 fileName = Params.NOVEL_KEY + id
                 downloadTime = System.currentTimeMillis()
                 filePath = uri.toString()
                 illustGson = ceui.pixiv.download.model.DownloadRecordSlim.createNovelJson(novel)
             }
             AppDatabase.getAppDatabase(Shaft.getContext()).downloadDao().insertDownload(entity)
-            ManagerReactive.pokeDoneTable()
-        }.onFailure { Timber.e(it, "recordDownload failed for novel $id") }
+        ManagerReactive.pokeDoneTable()
     }
 }
+

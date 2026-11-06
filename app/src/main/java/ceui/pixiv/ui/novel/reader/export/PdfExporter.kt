@@ -67,6 +67,7 @@ class PdfExporter : NovelExporter {
 
         val document = PdfDocument()
         val state = PageState()
+        try {
 
         fun startNewPage() {
             state.finish(document)
@@ -168,9 +169,11 @@ class PdfExporter : NovelExporter {
         val uri = ExportUtils.saveToDownloads(context, destination, format.mimeType) { out ->
             document.writeTo(out)
         }
-        document.close()
         if (uri == null) return ExportResult.Skipped(destination.joinTo())
         return ExportResult.Success(uri, destination.joinTo(), format)
+        } finally {
+            try { state.finish(document) } finally { document.close() }
+        }
     }
 
     /** Tracks the current PDF page's canvas cursor (y position). */
@@ -224,3 +227,4 @@ class PdfExporter : NovelExporter {
         }
     }
 }
+

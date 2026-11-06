@@ -263,7 +263,8 @@ class CrossSeriesDownloadTask(context: Context) {
     ): Boolean {
         val seriesId = seriesItem.id.toLong()
         // 先拉一次 getNovelSeries 拿 detail（带 user / caption 等），然后翻页。
-        val initial = Client.appApi.getNovelSeries(seriesId)
+        val initial = ceui.pixiv.download.queue.ContentPhases.run("novel-series", "series-detail", "novel-series:$seriesId",
+            ceui.pixiv.download.queue.ContentQueueStore.Pool.NETWORK) { Client.appApi.getNovelSeries(seriesId) }
         val detail = initial.novel_series_detail
             ?: throw RuntimeException("no series detail for $seriesId")
         val allNovels = fetchAllNovelsStartingFrom(seriesId, initial.novels.orEmpty())
@@ -317,7 +318,8 @@ class CrossSeriesDownloadTask(context: Context) {
      * 从系列 id 主动拉完全部章节（给 AllMergedOne 用）。
      */
     private suspend fun fetchAllNovels(seriesId: Long): List<Novel> {
-        val initial = Client.appApi.getNovelSeries(seriesId)
+        val initial = ceui.pixiv.download.queue.ContentPhases.run("novel-series", "series-detail", "novel-series:$seriesId",
+            ceui.pixiv.download.queue.ContentQueueStore.Pool.NETWORK) { Client.appApi.getNovelSeries(seriesId) }
         return fetchAllNovelsStartingFrom(seriesId, initial.novels.orEmpty())
     }
 
@@ -331,8 +333,10 @@ class CrossSeriesDownloadTask(context: Context) {
         while (safety < 50) {
             safety++
             val resp = try {
-                Client.appApi.getNovelSeries(seriesId, lastOrder)
-            } catch (ex: Exception) {
+                ceui.pixiv.download.queue.ContentPhases.run("novel-series", "series-page", "novel-series:$seriesId",
+                    ceui.pixiv.download.queue.ContentQueueStore.Pool.NETWORK) { Client.appApi.getNovelSeries(seriesId, lastOrder) }
+            } catch (ex: CancellationException) { throw ex }
+            catch (ex: Exception) {
                 Timber.e(ex, "getNovelSeries pagination failed at lastOrder=$lastOrder")
                 break
             }
@@ -351,7 +355,8 @@ class CrossSeriesDownloadTask(context: Context) {
 
     /** 同 [MergeDownloadNovelSeriesTask.fetchChapterWebNovel]:整体留 WebNovel 让 EPUB 拿到 illusts/images。 */
     private suspend fun fetchChapterWebNovel(novel: Novel): WebNovel {
-        val html = Client.appApi.getNovelText(novel.id).string()
+        val html = ceui.pixiv.download.queue.ContentPhases.run("novel-series", "chapter-text", "novel-text:${novel.id}",
+            ceui.pixiv.download.queue.ContentQueueStore.Pool.NETWORK) { Client.appApi.getNovelText(novel.id).use { it.string() } }
         return WebNovelParser.parsePixivObject(html)?.novel
             ?: throw RuntimeException("invalid web novel: ${novel.id}")
     }
@@ -367,3 +372,4 @@ class CrossSeriesDownloadTask(context: Context) {
         return "${base}_全系列合集_U${authorId}.${format.extension}"
     }
 }
+

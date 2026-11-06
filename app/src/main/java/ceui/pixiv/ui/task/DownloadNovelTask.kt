@@ -1,31 +1,14 @@
 package ceui.pixiv.ui.task
 
 import ceui.lisa.R
-import ceui.lisa.activities.Shaft
-import ceui.lisa.fragments.WebNovelParser
-import ceui.pixiv.api.Client
 import ceui.loxia.Novel
 import ceui.pixiv.api.model.WebNovel
-import ceui.pixiv.download.header.HeaderConfigRepo
-import ceui.pixiv.download.header.NovelHeaderRenderer
-import ceui.pixiv.ui.common.getImageIdInGallery
-import ceui.pixiv.ui.common.getTxtFileIdInDownloads
-import ceui.pixiv.ui.common.saveToDownloadsScopedStorage
 import ceui.pixiv.download.config.DownloadItems
 import ceui.pixiv.download.model.RelativePath
 import ceui.pixiv.download.toast.DownloadToastKind
 import ceui.pixiv.download.toast.DownloadToasts
-import com.blankj.utilcode.util.PathUtils
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import timber.log.Timber
-import java.io.BufferedWriter
-import java.io.File
-import java.io.FileOutputStream
-import java.io.OutputStreamWriter
 
 class DownloadNovelTask(
     private val coroutineScope: CoroutineScope,
@@ -38,91 +21,27 @@ class DownloadNovelTask(
 
     override fun start(onNext: () -> Unit) {
         super.start(onNext)
-
-        coroutineScope.launch {
-            val imageId = withContext(Dispatchers.IO) {
-                getTxtFileIdInDownloads(context, fileName)
-            }
-            if (imageId != null) {
-                Timber.d("${fileName} 文件已存在")
-                delay(100L)
-                _status.value = TaskStatus.Finished
-                onNext.invoke()
-            } else {
-                Timber.d("${fileName} 文件不已存在，准备下载")
-                execute()
-            }
-        }
+        coroutineScope.launch { execute() }
     }
 
     override suspend fun execute() {
         if (_status.value is TaskStatus.Executing || _status.value is TaskStatus.Finished) {
-            onIgnore()
-            return
+            onIgnore(); return
         }
-
         try {
-            onStart()
-            _status.value = TaskStatus.Executing(0)
-            val stringBuffer = StringBuffer()
-
-            val wNovel = if (webNovel != null) {
-                delay(1500L)
-                webNovel
-            } else {
-                val html = Client.appApi.getNovelText(novel.id).string()
-                WebNovelParser.parsePixivObject(html)?.novel
+            onStart(); _status.value = TaskStatus.Executing(0)
+            val result = ceui.pixiv.ui.novel.reader.export.QueuedNovelExports.get(context).single(
+                ceui.pixiv.ui.novel.reader.export.ExportFormat.Txt, novel, webNovel, null, destination,
+                ceui.pixiv.ui.novel.reader.export.EpubImageRetryPolicy.Auto, legacy = true)
+            when (result) {
+                is ceui.pixiv.ui.novel.reader.export.ExportResult.Failure -> onError(RuntimeException(result.message, result.cause))
+                else -> {
+                    DownloadToasts.show(DownloadToastKind.NOVEL_SAVE, context.getString(R.string.string_181))
+                    _status.value = TaskStatus.Finished; onEnd(Unit)
+                }
             }
-
-            if (wNovel == null) {
-                throw RuntimeException("invalid web novel")
-            }
-
-            _status.value = TaskStatus.Executing(50)
-            delay(1500L)
-
-            // 构建内容，去除 HTML 标签
-            stringBuffer.append("\n\n")
-            stringBuffer.append("<===== Shaft Novel Start =====>")
-            stringBuffer.append("\n\n")
-
-            // 用户自定义的信息头（设置 → 下载内容信息头设置）
-            stringBuffer.append(
-                NovelHeaderRenderer.render(
-                    novel = novel,
-                    preset = HeaderConfigRepo.activePreset(),
-                    isSeriesChapter = novel.series != null,
-                )
-            )
-            stringBuffer.append("\n")
-
-            stringBuffer.append("正文：")
-            stringBuffer.append("\n\n")
-            stringBuffer.append(replaceBrWithNewLine(wNovel.text)) // 去除 HTML 标签
-            stringBuffer.append("\n\n")
-            stringBuffer.append("<===== Shaft Novel End =====>")
-            stringBuffer.append("\n\n")
-
-            val b = saveToDownloadsScopedStorage(context, destination, stringBuffer.toString())
-            if (b) {
-                DownloadToasts.show(
-                    DownloadToastKind.NOVEL_SAVE,
-                    context.getString(R.string.string_181),
-                )
-                _status.value = TaskStatus.Finished
-                onEnd(Unit)
-            } else {
-                DownloadToasts.show(
-                    DownloadToastKind.NOVEL_SAVE,
-                    context.getString(R.string.save_novel_failed, fileName),
-                )
-                onError(RuntimeException("saveToDownloadsScopedStorage returned false"))
-            }
-
-
-        } catch (ex: Exception) {
-            onError(ex)
-        }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+        catch (error: Exception) { onError(error) }
     }
 
     // 定义替换方法，将 <br> 替换为换行符
@@ -135,3 +54,4 @@ class DownloadNovelTask(
         }
     }
 }
+

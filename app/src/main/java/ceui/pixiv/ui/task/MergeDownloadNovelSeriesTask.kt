@@ -189,7 +189,8 @@ class MergeDownloadNovelSeriesTask(context: Context) {
             emit(FetchEvent.Networking(pageIdx, "/v1/novel/series?series_id=$seriesId&last_order=${lastOrder ?: "—"}"))
             val t0 = System.currentTimeMillis()
             val resp = try {
-                Client.appApi.getNovelSeries(seriesId, lastOrder)
+                ceui.pixiv.download.queue.ContentPhases.run("novel-series", "series-page", "novel-series:$seriesId",
+                    ceui.pixiv.download.queue.ContentQueueStore.Pool.NETWORK) { Client.appApi.getNovelSeries(seriesId, lastOrder) }
             } catch (ex: CancellationException) {
                 throw ex
             } catch (ex: Exception) {
@@ -217,7 +218,8 @@ class MergeDownloadNovelSeriesTask(context: Context) {
      * 里把 `[pixivimage:XXX]` / `[uploadedimage:XXX]` 解析成真实 URL。
      */
     private suspend fun fetchChapterWebNovel(novel: Novel): WebNovel {
-        val html = Client.appApi.getNovelText(novel.id).string()
+        val html = ceui.pixiv.download.queue.ContentPhases.run("novel-series", "chapter-text", "novel-text:${novel.id}",
+            ceui.pixiv.download.queue.ContentQueueStore.Pool.NETWORK) { Client.appApi.getNovelText(novel.id).use { it.string() } }
         return WebNovelParser.parsePixivObject(html)?.novel
             ?: throw RuntimeException("invalid web novel: ${novel.id}")
     }
@@ -230,3 +232,4 @@ class MergeDownloadNovelSeriesTask(context: Context) {
 
 private fun hasIllustrations(webNovel: WebNovel): Boolean =
     !webNovel.illusts.isNullOrEmpty() || !webNovel.images.isNullOrEmpty()
+
