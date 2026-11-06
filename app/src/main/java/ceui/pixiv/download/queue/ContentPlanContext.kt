@@ -12,11 +12,17 @@ interface ContentPlanHandler {
     /** Group coordinators may await leaf parents; they use a separate planning lane. */
     val isGroup: Boolean get() = false
     fun onUserResume(plan: ContentPlanStore.Plan) {}
+    fun priority(plan: ContentPlanStore.Plan): Int = ContentQueueRuntime.SAVE
     /** Cheap admission predicate; a policy change must call refreshEligibility, not poll per plan. */
     fun canRun(plan: ContentPlanStore.Plan): Boolean = true
     suspend fun execute(context: ContentPlanContext)
     /** Only remove inputs owned by this plan; completed output and old library records are separate. */
     suspend fun cleanup(plan: ContentPlanStore.Plan, state: ContentQueueStore.State) {}
+}
+
+/** Inherited by child stages and source consumers, without retaining an Activity or task request. */
+class ContentPriority(val value: Int) : kotlin.coroutines.AbstractCoroutineContextElement(Key) {
+    companion object Key : kotlin.coroutines.CoroutineContext.Key<ContentPriority>
 }
 
 class ContentPlanContext internal constructor(

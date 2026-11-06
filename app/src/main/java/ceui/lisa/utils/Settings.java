@@ -1554,6 +1554,7 @@ public class Settings {
         if (n < 1) n = 1;
         if (n > 5) n = 5;
         this.maxConcurrentDownloads = n;
+        ceui.pixiv.download.queue.ContentQueueRuntime.notifyConfigurationChanged();
     }
 
     /** 低于 WorkManager 周期任务下限 15 的值视为损坏配置，按默认 30 处理 */
@@ -2305,3 +2306,4 @@ public class Settings {
         this.customZoomAddScale = customZoomAddScale;
     }
 }
+

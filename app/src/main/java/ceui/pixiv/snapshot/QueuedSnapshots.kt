@@ -29,6 +29,8 @@ class QueuedSnapshots internal constructor(private val app: Context,
     private val gson = Gson()
     private val manual = ConcurrentHashMap.newKeySet<String>()
     override fun onUserResume(plan: ContentPlanStore.Plan) { manual.add(plan.family) }
+    override fun priority(plan: ContentPlanStore.Plan): Int = if (request(plan).automatic)
+        ContentQueueRuntime.BACKGROUND else ContentQueueRuntime.SAVE
     init { queue.register(this) }
     fun enqueue(illust: Illust, comments: Boolean, original: Boolean, fresh: Boolean, automatic: Boolean): ContentPlanTicket {
         val family = "snapshot:${if (automatic) "auto" else "manual"}:${illust.id}:$original:${comments && !automatic}"

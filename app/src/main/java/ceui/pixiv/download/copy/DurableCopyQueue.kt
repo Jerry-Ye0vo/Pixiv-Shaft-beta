@@ -227,7 +227,7 @@ class DurableCopyQueue(
                 continue
             }
             if (row.state != State.QUEUED) continue
-            val lease = runtime.store.claim(row.id, Pool.COPY, capacity().coerceIn(1, 5)) ?: continue
+            val lease = runtime.claim(row.id, Pool.COPY, capacity().coerceIn(1, 5)) ?: continue
             ticket.publish(State.RUNNING); publish(ticket)
             workers[ticket.id] = scope.launch(start = CoroutineStart.LAZY) { run(ticket, lease) }.also { it.start() }
         }

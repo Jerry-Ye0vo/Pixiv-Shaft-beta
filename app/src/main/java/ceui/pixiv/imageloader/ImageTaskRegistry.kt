@@ -44,6 +44,7 @@ object ImageTaskRegistry {
             override fun removeEldestEntry(eldest: Map.Entry<String, ImageLoadTask>?): Boolean {
                 val evict = size > MAX_CACHE_SIZE
                 if (evict && eldest != null) {
+                    eldest.value.releaseUnused()
                     Timber.d("[ImgV3] registry EVICT url=${eldest.key.substringAfterLast('/')} state=${eldest.value.state.value} pool=$size")
                 }
                 return evict
@@ -105,6 +106,7 @@ object ImageTaskRegistry {
     fun remove(url: String) {
         val original = taskMap.remove(registryKey(ImageRequest(url, isOriginal = true)))
         val removed = taskMap.remove(registryKey(ImageRequest(url))) ?: original
+        original?.releaseUnused(); removed?.releaseUnused()
         Timber.d("[ImgV3] registry REMOVE url=${url.substringAfterLast('/')} found=${removed != null} pool=${taskMap.size}")
     }
 }

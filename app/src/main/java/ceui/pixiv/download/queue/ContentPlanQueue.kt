@@ -173,7 +173,7 @@ class ContentPlanQueue(
                 if (!canonical.reopen()) { store.cancel(plan.id); throw CancellationException("Parent withdrawn before retry") }
                 check(store.resume(plan.id)); plan = requireNotNull(store.get(plan.id))
             }
-            canonical.request = plan.request; canonical.sequence = plan.sequence
+            canonical.admitted = true; canonical.sequence = plan.sequence
             canonical.signal = { requestPump() }
             canonical.publish(plan.state, plan.error); publish(canonical)
             synchronized(lock) { families[plan.family] = canonical }
@@ -187,13 +187,13 @@ class ContentPlanQueue(
     }
     private fun restore(plan: ContentPlanStore.Plan, notify: Boolean = true) {
         val ticket = ContentPlanTicket(plan.id, plan.family, plan.kind)
-        ticket.request = plan.request; ticket.sequence = plan.sequence; ticket.reset(plan.state)
+        ticket.admitted = true; ticket.sequence = plan.sequence; ticket.reset(plan.state)
         ticket.publish(plan.state, plan.error); ticket.signal = { requestPump() }
         tickets[plan.id] = ticket
         synchronized(lock) {
             val pending = families[plan.family]
             // Do not bind a new explicit retry to an already-terminal FAILED observation.
-            if (pending == null || (pending.request.isNotEmpty() && pending.sequence < plan.sequence)) families[plan.family] = ticket
+            if (pending == null || (pending.admitted && pending.sequence < plan.sequence)) families[plan.family] = ticket
         }
         if (notify) publish(ticket)
     }
@@ -246,7 +246,8 @@ class ContentPlanQueue(
         var failure: Throwable? = null
         try {
             context.checkStop()
-            withContext(executing.asContextElement(if (handler.isGroup) "group:" + lease.id else lease.id)) { handler.execute(context) }
+            withContext(executing.asContextElement(if (handler.isGroup) "group:" + lease.id else lease.id) +
+                ContentPriority(handler.priority(lease))) { handler.execute(context) }
             check(context.outputCommitted) { "Parent worker returned without committing an output receipt" }
         } catch (error: Throwable) { failure = error }
         finally {

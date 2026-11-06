@@ -1,6 +1,7 @@
 package ceui.pixiv.imageloader
 
 import ceui.pixiv.download.queue.ContentQueueRuntime
+import ceui.pixiv.download.queue.ContentPriority
 import ceui.pixiv.download.queue.ContentQueueStore
 import ceui.pixiv.download.queue.ContentQueueStore.Pool
 import ceui.pixiv.download.queue.ContentQueueStore.State
@@ -41,6 +42,8 @@ internal class OriginalTransferQueue(
         var consumers = 0
         var stopping = false
         @Volatile var saveRequested = false
+        @Volatile var priority = ContentQueueRuntime.BACKGROUND
+        @Volatile var taskId: String? = null
     }
     private val mutex = Mutex()
     private val flights = mutableMapOf<String, Flight>()
@@ -57,6 +60,8 @@ internal class OriginalTransferQueue(
     }
 
     private suspend fun acquireOnIo(url: String, onProgress: (Int) -> Unit, saving: Boolean): OriginalFileLease {
+        val priority = if (!saving) ContentQueueRuntime.VISIBLE else
+            currentCoroutineContext()[ContentPriority]?.value ?: ContentQueueRuntime.SAVE
         val reference = pin(url) // reserve before probe and commit-triggered LRU trim
         var handedOff = false
         try {
@@ -73,11 +78,16 @@ internal class OriginalTransferQueue(
                         if (!retiring) {
                             existing.consumers++
                             if (saving) existing.saveRequested = true
+                            if (priority > existing.priority) {
+                                existing.priority = priority
+                                existing.taskId?.let { runtime.prioritize(it, priority) }
+                            }
                         }
                         existing to retiring
                     } else Flight().also { created ->
                         created.consumers = 1
                         created.saveRequested = saving
+                        created.priority = priority
                         flights[url] = created
                         created.job = scope.launch(start = CoroutineStart.ATOMIC) { transfer(url, created) }
                     } to false
@@ -121,15 +131,16 @@ internal class OriginalTransferQueue(
             if (already != null) { flight.result.complete(already); return }
             val digest = url.encodeUtf8().sha256().hex()
             taskId = "original:$digest"
+            flight.taskId = taskId
             runtime.store.admit(taskId, "original-cache:$digest", "pixiv-bytes:$digest",
                 Pool.NETWORK, url, State.QUEUED, false)
             while (lease == null) {
                 currentCoroutineContext().ensureActive()
                 val signal = runtime.changes.value
-                lease = runtime.store.claim(taskId, Pool.NETWORK, capacity().coerceIn(1, 5))
+                lease = runtime.claim(taskId, Pool.NETWORK, capacity().coerceIn(1, 5),
+                    flight.priority)
                 if (lease == null) {
-                    // Signals handle ordinary releases; timeout observes settings changes and legacy adapters.
-                    withTimeoutOrNull(250) { runtime.changes.first { it != signal } }
+                    runtime.changes.first { it != signal }
                 }
             }
             // Cache-only probe after the claim prevents a stale miss from forcing another request.
@@ -174,7 +185,7 @@ internal class OriginalTransferQueue(
                 } finally {
                     try { workerPin?.close() }
                     catch (error: Exception) { timber.log.Timber.tag("ContentQueue").w(error, "Cache pin release failed") }
-                    runtime.changed()
+                    taskId?.let(runtime::withdraw) ?: runtime.changed()
                     mutex.withLock { if (flights[url] === flight) flights.remove(url) }
                 }
             }

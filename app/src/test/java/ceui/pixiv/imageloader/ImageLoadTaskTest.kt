@@ -5,6 +5,7 @@ import java.io.IOException
 import java.net.SocketTimeoutException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
@@ -22,6 +23,31 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class ImageLoadTaskTest {
+
+    @Test fun unusedPreviewCanWithdrawItsFetchAndReturnToIdle() = runTest {
+        var closed = false
+        val task = ImageLoadTask(ImageRequest("https://example/unused.jpg"), this,
+            object : ImageFetcher {
+                override suspend fun fetch(url: String, onProgress: (Int) -> Unit): File {
+                    try { kotlinx.coroutines.awaitCancellation() } finally { closed = true }
+                }
+            }, elapsedRealtime = { 0L })
+        task.start(); runCurrent(); task.releaseUnused(); runCurrent()
+        assertTrue(closed); assertEquals(ImageLoadState.Idle, task.state.value)
+    }
+
+    @Test fun aFileConsumerSurvivesRegistryEvictionOfItsDisplayTask() = runTest {
+        val file = File.createTempFile("protected-image", ".jpg").apply { writeText("image") }
+        val release = CompletableDeferred<File>()
+        val task = ImageLoadTask(ImageRequest("https://example/shared.jpg"), this,
+            object : ImageFetcher {
+                override suspend fun fetch(url: String, onProgress: (Int) -> Unit) = release.await()
+            }, elapsedRealtime = { 0L })
+        var result: File? = null
+        val consumer = kotlinx.coroutines.CoroutineScope(coroutineContext).launch { result = task.awaitFile() }
+        runCurrent(); task.releaseUnused(); release.complete(file); runCurrent()
+        assertSame(file, result); consumer.join(); file.delete()
+    }
 
     private val mainDispatcher = StandardTestDispatcher()
 

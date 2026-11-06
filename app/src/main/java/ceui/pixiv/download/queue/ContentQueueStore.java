@@ -107,6 +107,12 @@ public final class ContentQueueStore extends SQLiteOpenHelper {
         });
     }
     public Task get(String id) { return read(getReadableDatabase(), id); }
+    /** Readiness check for the process arbiter; the subsequent claim remains the atomic authority. */
+    public boolean resourceAvailable(String id) {
+        try (Cursor c = getReadableDatabase().rawQuery("SELECT 1 FROM tasks t WHERE t.id=? AND t.state='QUEUED' AND NOT EXISTS (SELECT 1 FROM tasks live WHERE (live.resource_key=t.resource_key OR live.output_key=t.output_key) AND live.state IN " + LIVE + ")", new String[]{id})) {
+            return c.moveToFirst();
+        }
+    }
     private static Task read(SQLiteDatabase db, String id) {
         try (Cursor c = db.rawQuery("SELECT * FROM tasks WHERE id=?", new String[]{id})) {
             return c.moveToFirst() ? new Task(c) : null;
@@ -313,6 +319,11 @@ public final class ContentQueueStore extends SQLiteOpenHelper {
     }
 
     /** Keep a small tombstone so an interrupted legacy import cannot resurrect completed work. */
+    public void compactStages(int keep) {
+        if (keep < 1) throw new IllegalArgumentException("Must retain recent diagnostics");
+        getWritableDatabase().execSQL("DELETE FROM tasks WHERE id LIKE 'phase:%' AND state IN ('SUCCEEDED','FAILED','CANCELLED') AND seq NOT IN (SELECT seq FROM tasks WHERE id LIKE 'phase:%' ORDER BY seq DESC LIMIT ?)", new Object[]{keep});
+    }
+
     public void compactTerminal(String id) {
         ContentValues v = new ContentValues(); v.put("payload", "");
         getWritableDatabase().update("tasks", v, "id=? AND state IN ('SUCCEEDED','CANCELLED')", new String[]{id});

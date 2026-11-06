@@ -41,7 +41,8 @@ class ContentPhaseRunner(
                 val signal = runtime.changes.value
                 val state = runtime.store.get(id)?.state ?: throw IOException("Queued stage disappeared")
                 if (state == State.CANCELLED || state == State.CANCEL_REQUESTED) throw CancellationException("Stage withdrawn")
-                if (state == State.QUEUED) lease = runtime.store.claim(id, pool, capacity(pool).coerceIn(1, 5))
+                if (state == State.QUEUED) lease = runtime.claim(id, pool, capacity(pool).coerceIn(1, 5),
+                    currentCoroutineContext()[ContentPriority]?.value ?: ContentQueueRuntime.SAVE)
                 if (lease == null) runtime.changes.first { it != signal }
             }
             val result = withContext(HeldPhase(pool)) { currentCoroutineContext().ensureActive(); block() }
@@ -67,7 +68,7 @@ class ContentPhaseRunner(
                     val original = failure
                     if (original == null) throw acknowledgement
                     if (original !== acknowledgement) original.addSuppressed(acknowledgement)
-                } finally { runtime.changed() }
+                } finally { runtime.withdraw(id) }
             }
         }
     }

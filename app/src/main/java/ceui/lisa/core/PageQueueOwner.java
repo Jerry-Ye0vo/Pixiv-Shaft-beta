@@ -116,7 +116,7 @@ final class PageQueueOwner implements java.io.Closeable {
     synchronized Task claim(DownloadItem item, int capacity) {
         initialize();
         Task task = store.get(id(item));
-        return task == null ? null : store.claim(id(item), task.pool, capacity);
+        return task == null ? null : runtime.claim(id(item), task.pool, capacity);
     }
 
     synchronized void park(DownloadItem item) { initialize(); store.yieldAttempt(id(item)); }

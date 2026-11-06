@@ -19,7 +19,7 @@ class ContentPlanTicket internal constructor(private val reservationId: String, 
     private val mutable = MutableStateFlow(ContentPlanStatus(reservationId, family, kind, null))
     val status: StateFlow<ContentPlanStatus> = mutable
     @Volatile private var delegate: ContentPlanTicket? = null
-    internal var request: String = ""
+    internal var admitted = false
     internal var sequence = 0L
     internal var signal: () -> Unit = {}
 
