@@ -41,6 +41,9 @@ class OriginalTransferQueueTest {
         runtime.close(); app.deleteDatabase(name); dir.deleteRecursively()
         assertEquals("every loan and worker pin must be released", 0, pins.get())
     }
+    private fun runTimed(block: suspend CoroutineScope.() -> Unit) = runBlocking {
+        withTimeout(10_000, block)
+    }
     private fun queue(fetcher: ImageFetcher, cached: (String) -> File? = { null },
                       retry: (Throwable, Boolean) -> Boolean = { _, _ -> false }) = OriginalTransferQueue(
         runtime, scope, fetcher, cached,
@@ -53,7 +56,7 @@ class OriginalTransferQueueTest {
     }
     private fun taskId(url: String) = "original:" + url.encodeUtf8().sha256().hex()
 
-    @Test fun viewAndSaveShareOneActualHttpTransferAndCancellationIsConsumerScoped() = runBlocking {
+    @Test fun viewAndSaveShareOneActualHttpTransferAndCancellationIsConsumerScoped() = runTimed {
         val server = MockWebServer()
         server.start()
         val releaseBody = CompletableDeferred<Unit>()
@@ -85,7 +88,7 @@ class OriginalTransferQueueTest {
         } finally { releaseBody.complete(Unit); server.shutdown() }
     }
 
-    @Test fun fullNetworkCapacityWaitsWithoutStartingAnyTransport() = runBlocking {
+    @Test fun fullNetworkCapacityWaitsWithoutStartingAnyTransport() = runTimed {
         runtime.initialize()
         val other = runtime.store.enqueue("other", "other", Pool.NETWORK, "other")
         val held = runtime.store.claim(other, Pool.NETWORK, 1)
@@ -103,7 +106,7 @@ class OriginalTransferQueueTest {
         assertTrue(started.isCompleted)
     }
 
-    @Test fun lastConsumerCancellationRetainsPermitAndPinUntilWorkerReallyExits() = runBlocking {
+    @Test fun lastConsumerCancellationRetainsPermitAndPinUntilWorkerReallyExits() = runTimed {
         val started = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
         val q = queue(object : ImageFetcher {
@@ -126,7 +129,7 @@ class OriginalTransferQueueTest {
         } finally { release.complete(Unit) }
     }
 
-    @Test fun failedSharedAttemptCanBeRetriedWithANewToken() = runBlocking {
+    @Test fun failedSharedAttemptCanBeRetriedWithANewToken() = runTimed {
         val calls = AtomicInteger()
         val q = queue(object : ImageFetcher {
             override suspend fun fetch(url: String, onProgress: (Int) -> Unit): File {
@@ -141,7 +144,7 @@ class OriginalTransferQueueTest {
         assertEquals(2, calls.get())
     }
 
-    @Test fun differentQualityQueriesNeverShareAFileOrTaskIdentity() = runBlocking {
+    @Test fun differentQualityQueriesNeverShareAFileOrTaskIdentity() = runTimed {
         val calls = AtomicInteger()
         val q = queue(object : ImageFetcher {
             override suspend fun fetch(url: String, onProgress: (Int) -> Unit): File { calls.incrementAndGet(); return file() }
@@ -153,7 +156,7 @@ class OriginalTransferQueueTest {
         assertNotEquals(taskId(a), taskId(b))
     }
 
-    @Test fun sharedStallRetryHasExactlyOneBudget() = runBlocking {
+    @Test fun sharedStallRetryHasExactlyOneBudget() = runTimed {
         val calls = AtomicInteger()
         val q = queue(object : ImageFetcher {
             override suspend fun fetch(url: String, onProgress: (Int) -> Unit): File {

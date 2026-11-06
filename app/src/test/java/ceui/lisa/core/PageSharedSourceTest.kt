@@ -38,6 +38,7 @@ class PageSharedSourceTest {
     @After fun cleanup() = runBlocking {
         scope.coroutineContext[Job]!!.cancelAndJoin()
         owner.close(); db.close(); app.deleteDatabase("content_queue.db")
+        Unit
     }
     private fun item() = gson.fromJson("""{"uuid":"old-page","name":"p1.jpg","url":"https://example.invalid/original.jpg",
         "index":1,"illust":{"id":1,"page_count":3}}""", DownloadItem::class.java)
