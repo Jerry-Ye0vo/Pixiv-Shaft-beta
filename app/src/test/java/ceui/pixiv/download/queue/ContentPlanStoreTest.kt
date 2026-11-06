@@ -100,10 +100,11 @@ class ContentPlanStoreTest {
             plans.checkpoint(id, row.attempt, "checkpoint:$id")
             when (id) { "pause" -> plans.pause(id); "cancel" -> plans.cancel(id); "commit" -> plans.markCommitted(id, row.attempt) }
         }
-        ContentQueueStore(app, name).use { other ->
+        val other = ContentQueueStore(app, name)
+        try {
             assertEquals(State.RUNNING, ContentPlanStore(other).get("run").state)
             assertNotNull(ContentPlanStore(other).get("run").attempt)
-        }
+        } finally { other.close() }
         db.recoverAfterProcessDeath()
         assertEquals(State.QUEUED, plans.get("run").state)
         assertEquals(State.PAUSED, plans.get("pause").state)
