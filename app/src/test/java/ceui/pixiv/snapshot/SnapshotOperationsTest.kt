@@ -191,7 +191,7 @@ class SnapshotOperationsTest {
     }
     @Test fun cancellingARestoredImportRollsBackItsOnlyOldBackup() = scenario {
         val plan = interruptedImport(true); val ticket = requireNotNull(queue.ticket(plan))
-        assertTrue(ticket.cancel()); assertEquals(State.CANCELLED, end(ticket).state)
+        assertTrue(ticket.cancel()); ticket.status.first { it.state == State.CANCELLED }
         assertEquals("previous", File(target(), "images/p0.jpg").readText())
     }
 }
