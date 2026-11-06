@@ -77,6 +77,7 @@ class QueuedUgoira internal constructor(private val app: Context,
     private val publisher = ArtifactPublisher(phases, output)
     private val manual = ConcurrentHashMap.newKeySet<String>()
     override fun onUserResume(plan: ContentPlanStore.Plan) { manual.add(plan.family) }
+    override fun onNetworkPolicyRestricted() { manual.clear() }
     init { queue.register(this) }
     @JvmOverloads fun enqueue(illust: Illust, family: String = "ugoira-save:${illust.id}", once: Boolean = false): ContentPlanTicket {
         manual.add(family)

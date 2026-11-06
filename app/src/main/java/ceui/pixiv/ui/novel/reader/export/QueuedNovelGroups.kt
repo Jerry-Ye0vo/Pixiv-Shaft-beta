@@ -61,14 +61,28 @@ class QueuedNovelGroups internal constructor(private val app: Context,
         WebNovelParser.parsePixivObject(html)?.novel ?: throw IOException("Invalid novel ${novel.id}")
     },
     private val wait: suspend (Long) -> Unit = { delay(it) },
+    private val autoAllowed: () -> Boolean = ceui.lisa.utils.DownloadLimitTypeUtil::autoStartAllowed,
 ) : ContentPlanHandler {
     override val kind = "novel-series-group"
     override val isGroup = true
     private val gson = Gson()
+    private val manual = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     init { queue.register(this) }
+    override fun onUserResume(plan: ContentPlanStore.Plan) { manual.add(plan.family) }
+    override fun onNetworkPolicyRestricted() { manual.clear() }
+    override fun canRun(plan: ContentPlanStore.Plan): Boolean {
+        if (manual.contains(plan.family)) return true
+        val request = gson.fromJson(plan.request, NovelGroupRequest::class.java)
+        val state = gson.fromJson(plan.checkpoint, NovelGroupState::class.java)
+        val local = (state.selectedFormat ?: request.format) != ExportFormat.Epub.name &&
+            (queue.store.finishRequested(plan.id) || (state.parts.size == request.series.size &&
+                state.parts.all { it.output != null || it.failure != null || (it.listed && it.next >= it.novels.size) }))
+        return local || autoAllowed()
+    }
     fun enqueue(request: NovelGroupRequest): ContentPlanTicket {
         request.validate()
-        return queue.submit("novel-group:${UUID.randomUUID()}", kind) { gson.toJson(request) }
+        val family = "novel-group:${UUID.randomUUID()}"; manual.add(family)
+        return queue.submit(family, kind) { gson.toJson(request) }
     }
     fun state(id: String): NovelGroupState? = queue.store.get(id)?.let { gson.fromJson(it.checkpoint, NovelGroupState::class.java) }
     fun chooseFormat(ticket: ContentPlanTicket, format: ExportFormat) {
@@ -135,7 +149,8 @@ class QueuedNovelGroups internal constructor(private val app: Context,
                 val destination = destination(request.naming, meta, format)
                 val family = "${context.plan.id}:output:$index"
                 queue.store.ownChild(context.plan.id, family)
-                val child = exports.enqueueMerged(format, content, destination, family, reuseSucceeded = true)
+                val child = exports.enqueueMerged(format, content, destination, family, reuseSucceeded = true,
+                    manualStart = manual.contains(context.plan.family))
                 awaitChild(context, child)
                 val receipt = gson.fromJson(queue.store.get(child.id).checkpoint, ArtifactCheckpoint::class.java)
                 part.output = child.id; part.written = !receipt.skipped; save()
@@ -165,7 +180,8 @@ class QueuedNovelGroups internal constructor(private val app: Context,
             val target = rendered.copy(segments = path.segments)
             val family = "${context.plan.id}:output:all"
             queue.store.ownChild(context.plan.id, family)
-            val child = exports.enqueueMerged(format, content, target, family, reuseSucceeded = true)
+            val child = exports.enqueueMerged(format, content, target, family, reuseSucceeded = true,
+                manualStart = manual.contains(context.plan.family))
             awaitChild(context, child)
             val receipt = gson.fromJson(queue.store.get(child.id).checkpoint, ArtifactCheckpoint::class.java)
             state.success = if (receipt.skipped) 0 else 1

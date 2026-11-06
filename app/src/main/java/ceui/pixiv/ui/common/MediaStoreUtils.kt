@@ -111,6 +111,7 @@ fun deleteImageById(context: Context, imageId: Long): Boolean {
  * so callers must not strip the directory portion or the user's chosen folder
  * structure (`byAuthor`, `byDate`, `detailed`, …) is silently lost.
  */
+@androidx.annotation.WorkerThread
 fun saveToDownloadsScopedStorage(
     context: Context,
     path: ceui.pixiv.download.model.RelativePath,

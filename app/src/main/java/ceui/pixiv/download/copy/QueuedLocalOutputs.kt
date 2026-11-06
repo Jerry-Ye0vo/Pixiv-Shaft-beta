@@ -148,6 +148,10 @@ class QueuedLocalOutputs internal constructor(private val app: Context,
                         output.fd.sync()
                     }
                     if (temporary.length() <= 0) throw IOException("Empty local output")
+                    if (request.type == BACKUP) {
+                        val json = temporary.reader(Charsets.UTF_8).use { com.google.gson.JsonParser.parseReader(it) }
+                        if (!json.isJsonObject && !json.isJsonArray) throw IOException("Backup did not produce a complete JSON document")
+                    }
                     currentCoroutineContext().ensureActive(); context.checkStop()
                     if (!temporary.renameTo(source)) throw IOException("Cannot preserve local output input")
                 } finally { temporary.delete() }

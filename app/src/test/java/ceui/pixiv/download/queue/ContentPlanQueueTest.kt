@@ -239,6 +239,7 @@ class ContentPlanQueueTest {
         queue.register(object : ContentPlanHandler {
             override val kind = "model"
             override fun canRun(plan: ContentPlanStore.Plan) = allowed.get()
+            override fun onNetworkPolicyRestricted() { allowed.set(false) }
             override suspend fun execute(context: ContentPlanContext) {
                 if (calls.incrementAndGet() == 1) {
                     context.checkpoint("saved-input"); entered.complete(Unit); awaitCancellation()
@@ -247,7 +248,7 @@ class ContentPlanQueueTest {
             }
         })
         val ticket = submit(); entered.await()
-        allowed.set(false); queue.refreshEligibility()
+        queue.restrictNetworkPolicy()
         eventually { ticket.status.value.state == State.QUEUED }
         assertEquals(1, calls.get()); assertEquals("saved-input", queue.store.get(ticket.id).checkpoint)
         allowed.set(true); queue.refreshEligibility()

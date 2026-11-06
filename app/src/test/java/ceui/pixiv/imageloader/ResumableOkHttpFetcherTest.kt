@@ -60,6 +60,12 @@ class ResumableOkHttpFetcherTest {
     )
 
     private fun testUrl(): String = server.url("/img-original/img/2026/01/01/00/00/00/12345_p0.jpg").toString()
+    @Test fun `queued source preserves HTTP status for Muzei invalid artwork handling`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(404))
+        try { testFetcher().fetch(testUrl()) {}; org.junit.Assert.fail("404 must fail") }
+        catch (error: ImageHttpException) { assertEquals(404, error.statusCode) }
+        assertEquals(1, server.requestCount)
+    }
 
     @Test
     fun `fresh download from scratch commits completed file`() = runTest {

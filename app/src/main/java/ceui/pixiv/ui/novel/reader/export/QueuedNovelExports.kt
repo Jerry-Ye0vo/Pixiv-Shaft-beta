@@ -56,12 +56,22 @@ class QueuedNovelExports internal constructor(private val app: Context,
     val queue: ContentPlanQueue = ContentPlanQueue.get(app),
     private val phases: ContentPhaseRunner = ContentPhases.runner(app),
     output: ceui.pixiv.download.copy.CopyOutput = AndroidCopyOutput(app) { DownloadsRegistry.downloads },
+    private val autoAllowed: () -> Boolean = ceui.lisa.utils.DownloadLimitTypeUtil::autoStartAllowed,
     private val record: (Novel, Uri) -> Unit = NovelExportManager::recordDownload,
 ) : ContentPlanHandler {
     override val kind = "novel-export"
     private val gson = Gson()
     private val publisher = ArtifactPublisher(phases, output)
+    private val manual = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     init { queue.register(this) }
+    override fun onUserResume(plan: ContentPlanStore.Plan) { manual.add(plan.family) }
+    override fun onNetworkPolicyRestricted() { manual.clear() }
+    override fun canRun(plan: ContentPlanStore.Plan): Boolean {
+        if (manual.contains(plan.family) || source(plan).isFile) return true
+        val request = request(plan)
+        val needsNetwork = request.format == ExportFormat.Epub.name || (request.webJson == null && request.merged == null)
+        return !needsNetwork || autoAllowed()
+    }
     private fun request(plan: ContentPlanStore.Plan) = gson.fromJson(plan.request, NovelExportRequest::class.java).also { it.validate() }
     private fun source(plan: ContentPlanStore.Plan): File {
         val hash = MessageDigest.getInstance("SHA-256").digest(plan.id.toByteArray()).joinToString("") { "%02x".format(it) }
@@ -75,6 +85,7 @@ class QueuedNovelExports internal constructor(private val app: Context,
         destination: RelativePath, retry: EpubImageRetryPolicy, legacy: Boolean = false): ExportResult {
         val id = novel?.id ?: webNovel?.id?.toLongOrNull() ?: 0L
         val family = "novel-export:$id:${format.name}:${destination.joinTo()}"
+        manual.add(family)
         val ticket = queue.submit(family, kind) {
             gson.toJson(NovelExportRequest(format = format.name, novelJson = novel?.let(gson::toJson), novelId = id,
                 webJson = webNovel?.let(gson::toJson), tokens = tokens?.map(ExportToken::capture), merged = null,
@@ -86,7 +97,9 @@ class QueuedNovelExports internal constructor(private val app: Context,
     }
     suspend fun merged(format: ExportFormat, content: MergedNovelContent, destination: RelativePath,
         retry: EpubImageRetryPolicy, image: suspend (String, Int) -> Unit): Boolean {
-        val ticket = queue.submit("novel-merge:${content.documentId}:${format.name}:${destination.joinTo()}", kind) {
+        val family = "novel-merge:${content.documentId}:${format.name}:${destination.joinTo()}"
+        manual.add(family)
+        val ticket = queue.submit(family, kind) {
             gson.toJson(NovelExportRequest(format = format.name, novelJson = null, novelId = 0, webJson = null,
                 tokens = null, merged = ExportMerged.capture(content, gson), destination = freeze(Bucket.NovelSeries, destination, format),
                 header = null, retryMode = mode(retry)))
@@ -101,11 +114,13 @@ class QueuedNovelExports internal constructor(private val app: Context,
     }
     /** Stable group ownership prevents re-export after a child committed before its group acknowledged it. */
     internal fun enqueueMerged(format: ExportFormat, content: MergedNovelContent, destination: CopyDestination,
-        family: String, reuseSucceeded: Boolean): ContentPlanTicket = queue.submit(family, kind,
-            reuseSucceeded = reuseSucceeded) {
-        gson.toJson(NovelExportRequest(format = format.name, novelJson = null, novelId = 0, webJson = null,
-            tokens = null, merged = ExportMerged.capture(content, gson), destination = destination,
-            header = null, retryMode = "batch"))
+        family: String, reuseSucceeded: Boolean, manualStart: Boolean = true): ContentPlanTicket {
+        if (manualStart) manual.add(family)
+        return queue.submit(family, kind, reuseSucceeded = reuseSucceeded) {
+            gson.toJson(NovelExportRequest(format = format.name, novelJson = null, novelId = 0, webJson = null,
+                tokens = null, merged = ExportMerged.capture(content, gson), destination = destination,
+                header = null, retryMode = "batch"))
+        }
     }
     private suspend fun await(ticket: ContentPlanTicket, path: RelativePath, format: ExportFormat,
         progress: suspend (String) -> Unit = {}): ExportResult {

@@ -1,0 +1,19 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="content_task_choose_format">Devam etmek için dışa aktarma biçimini seçin</string>
+    <string name="content_task_processing">İşleniyor; sayfadan ayrılınca devam eder</string>
+    <string name="content_task_persisted">Görev kaydedildi</string>
+    <string name="content_task_running">Devam ediyor</string>
+    <string name="content_task_paused">Duraklatıldı</string>
+    <string name="content_task_failed">Başarısız</string>
+    <string name="content_task_done">Tamamlandı</string>
+    <string name="content_task_cancelled">İptal edildi</string>
+    <string name="content_task_stopping">Durduruluyor</string>
+    <string name="content_task_waiting">Bekliyor</string>
+    <string name="content_task_resume">Devam et</string>
+    <string name="content_task_pause">Duraklat</string>
+    <string name="content_task_cancel">Görevi iptal et</string>
+    <string name="content_task_recent">Son görevler</string>
+    <string name="content_task_finish_partial">Getirmeyi durdur ve mevcut bölümleri kaydet</string>
+    <string name="content_task_recent_empty">Başka son görev yok</string>
+</resources>

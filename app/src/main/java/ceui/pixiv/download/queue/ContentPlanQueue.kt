@@ -115,6 +115,7 @@ class ContentPlanQueue(
     fun ticket(id: String): ContentPlanTicket? = tickets[id]
     fun latest(family: String): ContentPlanTicket? = synchronized(lock) { families[family] }
     fun refreshEligibility() { requestPump() }
+    fun restrictNetworkPolicy() { handlers.values.forEach { it.onNetworkPolicyRestricted() }; requestPump() }
     fun resume(id: String) { commands.trySend {
         val ticket = tickets[id] ?: return@trySend
         if (workers.containsKey(id)) return@trySend

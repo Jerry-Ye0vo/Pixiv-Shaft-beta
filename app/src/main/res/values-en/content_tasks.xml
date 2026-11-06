@@ -1,0 +1,19 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="content_task_choose_format">Choose an export format to continue</string>
+    <string name="content_task_processing">Processing; continues after leaving this page</string>
+    <string name="content_task_persisted">Task saved</string>
+    <string name="content_task_running">In progress</string>
+    <string name="content_task_paused">Paused</string>
+    <string name="content_task_failed">Failed</string>
+    <string name="content_task_done">Completed</string>
+    <string name="content_task_cancelled">Cancelled</string>
+    <string name="content_task_stopping">Stopping</string>
+    <string name="content_task_waiting">Waiting</string>
+    <string name="content_task_resume">Resume</string>
+    <string name="content_task_pause">Pause</string>
+    <string name="content_task_cancel">Cancel task</string>
+    <string name="content_task_recent">Recent tasks</string>
+    <string name="content_task_finish_partial">Stop fetching and save existing chapters</string>
+    <string name="content_task_recent_empty">No other recent tasks</string>
+</resources>

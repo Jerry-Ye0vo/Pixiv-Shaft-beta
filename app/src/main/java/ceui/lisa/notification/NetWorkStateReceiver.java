@@ -39,16 +39,10 @@ public class NetWorkStateReceiver extends BroadcastReceiver {
         int action = actionFor(DownloadLimitTypeUtil.requiresWifi(), wasWifi, wifi);
         if (action == ACTION_NONE) return;
 
-        ceui.pixiv.download.model.QueuedModels.refreshEligibility();
-        ceui.pixiv.ui.bulk.QueuedUgoira.refreshEligibility();
-        ceui.pixiv.snapshot.QueuedSnapshots.refreshEligibility();
-        ceui.pixiv.ui.novel.reader.settings.QueuedReaderFonts.refreshEligibility();
+        ceui.pixiv.download.queue.ContentPlanQueue.get(context).refreshEligibility();
 
         if (action == ACTION_PARK) {
-            ceui.pixiv.download.model.QueuedModels.onNetworkGateClosed();
-            ceui.pixiv.ui.bulk.QueuedUgoira.onNetworkGateClosed();
-            ceui.pixiv.snapshot.QueuedSnapshots.onNetworkGateClosed();
-            ceui.pixiv.ui.novel.reader.settings.QueuedReaderFonts.onNetworkGateClosed();
+            ceui.pixiv.download.queue.ContentPlanQueue.get(context).restrictNetworkPolicy();
             // 离开 Wi-Fi：把在跑的下载退回**等待态**（不是暂停态）—— 用户设的是「只在 Wi-Fi
             // 下下」，不是「暂停」；回到 Wi-Fi 时下面的分支会把它们自动接续。
             // 已有的「用户手动放行」随之收回：用户在 Wi-Fi 下点的继续不等于同意之后走流量，
@@ -66,6 +60,22 @@ public class NetWorkStateReceiver extends BroadcastReceiver {
         Manager.get().triggerPump();
         QueueDownloadManager queue = queueOf(context);
         if (queue != null) queue.onNetworkGateOpened();
+    }
+
+    /** Apply the selected setting now; opening a gate never resumes an explicitly paused task. */
+    public static void onDownloadSettingsChanged(Context context) {
+        ceui.pixiv.download.queue.ContentQueueRuntime.get(context).changed();
+        ceui.pixiv.download.queue.ContentPlanQueue plans = ceui.pixiv.download.queue.ContentPlanQueue.get(context);
+        QueueDownloadManager queue = queueOf(context);
+        if (DownloadLimitTypeUtil.requiresWifi() && !NetworkUtils.isWifiConnected()) {
+            plans.restrictNetworkPolicy();
+            Manager.get().parkForNetwork();
+            if (queue != null) queue.onNetworkGateClosed();
+        } else {
+            plans.refreshEligibility();
+            Manager.get().triggerPump();
+            if (queue != null) queue.onNetworkGateOpened();
+        }
     }
 
     static final int ACTION_NONE = 0;

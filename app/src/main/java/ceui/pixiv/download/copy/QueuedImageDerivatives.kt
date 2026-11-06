@@ -79,7 +79,13 @@ class QueuedImageDerivatives internal constructor(private val app: Context,
     override val kind = "image-derivative"
     private val gson = Gson()
     private val publisher = ArtifactPublisher(phases, output)
+    private val manual = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     init { queue.register(this) }
+    override fun onUserResume(plan: ContentPlanStore.Plan) { manual.add(plan.family) }
+    override fun onNetworkPolicyRestricted() { manual.clear() }
+    override fun canRun(plan: ContentPlanStore.Plan): Boolean = manual.contains(plan.family) ||
+        ceui.lisa.utils.DownloadLimitTypeUtil.autoStartAllowed() || File(directory(plan.id), "artifact").isFile ||
+        runCatching { request(plan).let { it.type != POSTER && it.sourcePath?.let(::File)?.isFile == true } }.getOrDefault(true)
     private fun directory(id: String) = File(app.filesDir, "content_image_derivatives/${hash(id)}")
     private fun request(plan: ContentPlanStore.Plan) = gson.fromJson(plan.request, ImageDerivativeRequest::class.java).also {
         require(it.version == 1 && it.type in TYPES && it.page >= 0 && it.sourceUrl.isNotBlank())
@@ -87,7 +93,10 @@ class QueuedImageDerivatives internal constructor(private val app: Context,
         if (it.type.startsWith("filter")) require(it.adjust.size == FilterAdjust.entries.size && it.intensity in 0..100)
         it.shareRoot?.let { root -> require(root == app.cacheDir.absolutePath || root == app.externalCacheDir?.absolutePath) }
     }
-    fun enqueue(spec: ImageDerivativeRequest): ContentPlanTicket = queue.submit("image-derivative:${UUID.randomUUID()}", kind) { gson.toJson(spec) }
+    fun enqueue(spec: ImageDerivativeRequest): ContentPlanTicket {
+        val family = "image-derivative:${UUID.randomUUID()}"; manual.add(family)
+        return queue.submit(family, kind) { gson.toJson(spec) }
+    }
     suspend fun await(ticket: ContentPlanTicket): ImageDerivativeResult {
         val end = ticket.status.first { it.state in ContentPlanTicket.OBSERVABLE_END }
         if (end.state in setOf(State.PAUSED, State.CANCELLED)) throw CancellationException("Image export stopped")
@@ -162,12 +171,15 @@ class QueuedImageDerivatives internal constructor(private val app: Context,
             if (!sourceReady) {
                 val file = local(spec, illust)
                 if (file != null) CopyInputReferences.reserve(file).use { capture(file) }
-                else ResumableOkHttpFetcher.acquire(spec.sourceUrl, {}, saving = true).use { capture(it.file) }
+                else {
+                    if (!manual.contains(context.plan.family) && !ceui.lisa.utils.DownloadLimitTypeUtil.autoStartAllowed()) context.yieldForPolicy()
+                    ResumableOkHttpFetcher.acquire(spec.sourceUrl, {}, saving = true).use { capture(it.file) }
+                }
             }
             val avatar = File(dir, "avatar")
             if (spec.type == POSTER && !state.avatarAttempted) {
                 val url = illust.user?.profile_image_urls?.findMaxSizeUrl()
-                if (!url.isNullOrBlank()) try {
+                if (!url.isNullOrBlank() && (manual.contains(context.plan.family) || ceui.lisa.utils.DownloadLimitTypeUtil.autoStartAllowed())) try {
                     ResumableOkHttpFetcher.acquire(url, {}, saving = true).use { lease ->
                         phases.run(context.plan.id, "poster-avatar", "derivative:${context.plan.id}", Pool.COPY) {
                             FileOutputStream(avatar).use { out -> lease.file.inputStream().use { it.copyTo(out) }; out.fd.sync() }

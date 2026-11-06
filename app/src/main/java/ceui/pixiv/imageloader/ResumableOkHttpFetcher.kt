@@ -136,7 +136,7 @@ class ResumableOkHttpFetcher(
             response = runInterruptible { call.execute() }
             val code = response.code
             if (!response.isSuccessful && code != 416) {
-                throw IOException("HTTP $code ${response.message}")
+                throw ImageHttpException(code, "HTTP $code ${response.message}")
             }
 
             val body = response.body
@@ -256,3 +256,6 @@ class ResumableOkHttpFetcher(
 
 }
 
+
+/** Typed status retained for external providers that retire deleted/private artwork on 4xx. */
+class ImageHttpException(val statusCode: Int, message: String) : IOException(message)

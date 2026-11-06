@@ -29,6 +29,7 @@ class QueuedSnapshots internal constructor(private val app: Context,
     private val gson = Gson()
     private val manual = ConcurrentHashMap.newKeySet<String>()
     override fun onUserResume(plan: ContentPlanStore.Plan) { manual.add(plan.family) }
+    override fun onNetworkPolicyRestricted() { manual.clear() }
     override fun priority(plan: ContentPlanStore.Plan): Int = if (request(plan).automatic)
         ContentQueueRuntime.BACKGROUND else ContentQueueRuntime.SAVE
     init { queue.register(this) }

@@ -53,7 +53,7 @@ class NovelGroupQueueTest {
     }
     private fun start() {
         queue = ContentPlanQueue(runtime, 1)
-        exports = QueuedNovelExports(app, queue, ContentPhaseRunner(runtime) { 1 }, provider) { _, _ -> }
+        exports = QueuedNovelExports(app, queue, ContentPhaseRunner(runtime) { 1 }, provider, autoAllowed = { true }) { _, _ -> }
     }
     @After fun teardown() {
         runBlocking { queue.shutdown() }; runtime.close(); app.deleteDatabase(name); directory.deleteRecursively()
@@ -71,7 +71,7 @@ class NovelGroupQueueTest {
     private fun service(page: suspend (Long, Int?) -> NovelGroupPage = { id, _ ->
         NovelGroupPage(null, listOf(novel(id * 10), novel(id * 10 + 1)), false) },
         chapter: suspend (Novel) -> WebNovel = { web(it) }, wait: suspend (Long) -> Unit = {}) =
-        QueuedNovelGroups(app, queue, ContentPhaseRunner(runtime) { 1 }, exports, page, chapter, wait)
+        QueuedNovelGroups(app, queue, ContentPhaseRunner(runtime) { 1 }, exports, page, chapter, wait, autoAllowed = { true })
 
     @Test fun fullSeriesFetchesAndPublishesAtEveryCapacityOne() = scenario {
         val service = service(); val ticket = service.enqueue(spec())

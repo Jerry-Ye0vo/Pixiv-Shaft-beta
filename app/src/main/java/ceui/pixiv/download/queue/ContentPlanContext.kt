@@ -12,6 +12,7 @@ interface ContentPlanHandler {
     /** Group coordinators may await leaf parents; they use a separate planning lane. */
     val isGroup: Boolean get() = false
     fun onUserResume(plan: ContentPlanStore.Plan) {}
+    fun onNetworkPolicyRestricted() {}
     fun priority(plan: ContentPlanStore.Plan): Int = ContentQueueRuntime.SAVE
     /** Cheap admission predicate; a policy change must call refreshEligibility, not poll per plan. */
     fun canRun(plan: ContentPlanStore.Plan): Boolean = true

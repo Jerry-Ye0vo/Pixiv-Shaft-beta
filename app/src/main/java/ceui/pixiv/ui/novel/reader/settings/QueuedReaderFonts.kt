@@ -48,8 +48,9 @@ class QueuedReaderFonts internal constructor(private val app: Context,
     private fun directory(id: String) = File(app.noBackupFilesDir, "content_reader_fonts/" +
         java.security.MessageDigest.getInstance("SHA-256").digest(id.toByteArray()).joinToString("") { "%02x".format(it) })
     override fun onUserResume(plan: ContentPlanStore.Plan) { manual.add(plan.family) }
+    override fun onNetworkPolicyRestricted() { manual.clear() }
     override fun canRun(plan: ContentPlanStore.Plan): Boolean = manual.contains(plan.family) || allowed() ||
-        runCatching { request(plan).delete || File(directory(plan.id), "font").isFile }.getOrDefault(true)
+        runCatching { request(plan).delete || gson.fromJson(plan.checkpoint, ReaderFontCheckpoint::class.java).prepared }.getOrDefault(true)
     private suspend fun matches(file: File, request: ReaderFontRequest) = file.isFile && file.length() == request.bytes &&
         ArtifactPublisher.digest(file) == request.sha256
     override suspend fun execute(context: ContentPlanContext) {

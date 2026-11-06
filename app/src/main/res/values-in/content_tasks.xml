@@ -1,0 +1,19 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="content_task_choose_format">Pilih format ekspor untuk melanjutkan</string>
+    <string name="content_task_processing">Memproses; tetap berjalan setelah meninggalkan halaman</string>
+    <string name="content_task_persisted">Tugas disimpan</string>
+    <string name="content_task_running">Sedang berlangsung</string>
+    <string name="content_task_paused">Dijeda</string>
+    <string name="content_task_failed">Gagal</string>
+    <string name="content_task_done">Selesai</string>
+    <string name="content_task_cancelled">Dibatalkan</string>
+    <string name="content_task_stopping">Menghentikan</string>
+    <string name="content_task_waiting">Menunggu</string>
+    <string name="content_task_resume">Lanjutkan</string>
+    <string name="content_task_pause">Jeda</string>
+    <string name="content_task_cancel">Batalkan tugas</string>
+    <string name="content_task_recent">Tugas terbaru</string>
+    <string name="content_task_finish_partial">Berhenti mengambil dan simpan bab yang tersedia</string>
+    <string name="content_task_recent_empty">Tidak ada tugas terbaru lainnya</string>
+</resources>

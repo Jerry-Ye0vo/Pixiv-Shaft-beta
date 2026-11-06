@@ -149,7 +149,17 @@ class StickerRepository @Inject constructor(private val app: Application) {
                 val coroutine = currentCoroutineContext()
                 var lastProgressAt = 0L
                 var lastPhase = ""
-                val ready = store.prepare(catalog, ::download,
+                val ready = store.prepare(catalog, { pkg, destination, progress ->
+                    kotlinx.coroutines.runBlocking(coroutine) {
+                        kotlinx.coroutines.withContext(ceui.pixiv.download.queue.ContentPriority(ceui.pixiv.download.queue.ContentQueueRuntime.BACKGROUND)) {
+                            ceui.pixiv.download.queue.ContentPhases.run("sticker-display-cache", "sticker-package", "sticker-package:${pkg.sha256}",
+                                ceui.pixiv.download.queue.ContentQueueStore.Pool.NETWORK) {
+                                ceui.pixiv.download.network.ResumableFileTransfer.transfer(StickerDownloadSource.url(pkg), destination, storage,
+                                    maximumBytes = pkg.size, onProgress = { bytes, _ -> progress(bytes) })
+                            }
+                        }
+                    }
+                },
                     { phase, bytes, total ->
                         mutableState.value = StickerState.Loading(phase, bytes, total)
                         if (phase != lastPhase || System.currentTimeMillis() - lastProgressAt >= 2000) {
@@ -158,7 +168,13 @@ class StickerRepository @Inject constructor(private val app: Application) {
                             lastProgressAt = System.currentTimeMillis()
                         }
                     },
-                    { coroutine.ensureActive() })
+                    { coroutine.ensureActive() },
+                    { body -> kotlinx.coroutines.runBlocking(coroutine) {
+                        kotlinx.coroutines.withContext(ceui.pixiv.download.queue.ContentPriority(ceui.pixiv.download.queue.ContentQueueRuntime.BACKGROUND)) {
+                            ceui.pixiv.download.queue.ContentPhases.run("sticker-display-cache", "sticker-install", "sticker-install",
+                                ceui.pixiv.download.queue.ContentQueueStore.Pool.COPY) { body() }
+                        }
+                    } })
                 mutableState.value = StickerState.Ready(ready)
             } catch (error: CancellationException) {
                 mutableState.value = StickerState.Idle
@@ -204,30 +220,7 @@ class StickerRepository @Inject constructor(private val app: Application) {
         }
     }
 
-    private fun download(pkg: StickerPackage, destination: File, progress: (Long) -> Unit) {
-        // Keep legacy catalogs/cache identities intact, but never request their COS URLs.
-        storage.newCall(Request.Builder().url(StickerDownloadSource.url(pkg)).build()).execute().use { response ->
-            if (!response.isSuccessful) throw IOException("Sticker ZIP HTTP ${response.code}")
-            val body = response.body ?: throw IOException("Empty sticker ZIP")
-            if (body.contentLength() >= 0 && body.contentLength() != pkg.size) throw IOException("Sticker ZIP length mismatch")
-            body.byteStream().use { input ->
-                FileOutputStream(destination).use { output ->
-                    val buffer = ByteArray(64 * 1024)
-                    var bytes = 0L
-                    while (true) {
-                        val n = input.read(buffer)
-                        if (n < 0) break
-                        bytes += n
-                        if (bytes > pkg.size) throw IOException("Sticker ZIP exceeds declared size")
-                        output.write(buffer, 0, n)
-                        progress(bytes)
-                    }
-                    output.fd.sync()
-                    if (bytes != pkg.size) throw IOException("Incomplete sticker ZIP")
-                }
-            }
-        }
-    }
+
 
     /** Called on Glide's IO thread. Failure changes the gate; never starts a URL request. */
     fun localFile(model: LocalSticker): File {
@@ -250,3 +243,4 @@ class StickerRepository @Inject constructor(private val app: Application) {
         }
     }
 }
+

@@ -45,8 +45,21 @@ class QueuedUgoiraFrameExports internal constructor(private val app: Context,
     private val gifEncoder: (List<File>, List<Int>, OutputStream, (Int) -> Unit) -> Unit = ::encodeFramesToGif,
 ) {
     private val gson = Gson()
+    private val manual = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private fun canRun(plan: ContentPlanStore.Plan): Boolean {
+        if (manual.contains(plan.family) || File(root(plan.id), "artifact").isFile) return true
+        val request = request(plan)
+        if (request.offlineDir != null || request.paths.all { File(it).isFile }) return true
+        val json = if (plan.kind == GROUP) plan.checkpoint else gson.fromJson(plan.checkpoint, ArtifactCheckpoint::class.java).domain
+        val saved = runCatching { gson.fromJson(json, FrameExportState::class.java) }.getOrNull()
+        if (saved != null && saved.inputs.size == request.indices.size && saved.inputs.all { File(root(plan.id), "frames/${it.name}").isFile }) return true
+        return ceui.lisa.utils.DownloadLimitTypeUtil.autoStartAllowed()
+    }
     private val clip = object : ContentPlanHandler {
         override val kind = CLIP
+        override fun canRun(plan: ContentPlanStore.Plan) = this@QueuedUgoiraFrameExports.canRun(plan)
+        override fun onUserResume(plan: ContentPlanStore.Plan) { manual.add(plan.family) }
+        override fun onNetworkPolicyRestricted() { manual.clear() }
         override suspend fun execute(context: ContentPlanContext) = executeClip(context)
         override suspend fun reconcile(plan: ContentPlanStore.Plan): Boolean {
             val request = request(plan); val outer = gson.fromJson(plan.checkpoint, ArtifactCheckpoint::class.java)
@@ -59,6 +72,9 @@ class QueuedUgoiraFrameExports internal constructor(private val app: Context,
     private val group = object : ContentPlanHandler {
         override val kind = GROUP
         override val isGroup = true
+        override fun canRun(plan: ContentPlanStore.Plan) = this@QueuedUgoiraFrameExports.canRun(plan)
+        override fun onUserResume(plan: ContentPlanStore.Plan) { manual.add(plan.family) }
+        override fun onNetworkPolicyRestricted() { manual.clear() }
         override suspend fun execute(context: ContentPlanContext) = executeFrames(context)
         override suspend fun reconcile(plan: ContentPlanStore.Plan): Boolean {
             val state = gson.fromJson(plan.checkpoint, FrameExportState::class.java)
@@ -79,8 +95,10 @@ class QueuedUgoiraFrameExports internal constructor(private val app: Context,
         it.destinations.forEach { d -> d.relativePath(); d.storageChoice(); d.overwrite() }
         it.shareRoot?.let { r -> require(r == app.cacheDir.absolutePath || r == app.externalCacheDir?.absolutePath) }
     }
-    internal fun enqueue(request: FrameExportRequest, frames: Boolean): ContentPlanTicket = queue.submit(
-        "ugoira-frame-export:${UUID.randomUUID()}", if (frames) GROUP else CLIP) { gson.toJson(request) }
+    internal fun enqueue(request: FrameExportRequest, frames: Boolean): ContentPlanTicket {
+        val family = "ugoira-frame-export:${UUID.randomUUID()}"; manual.add(family)
+        return queue.submit(family, if (frames) GROUP else CLIP) { gson.toJson(request) }
+    }
     suspend fun frames(illust: Illust, frames: UgoiraFrames, indices: List<Int>, share: Boolean,
         offline: File?): List<FrameExportReceipt> = await(enqueue(freeze(illust, frames, indices, share, false, false, offline), true))
     suspend fun clip(illust: Illust, frames: UgoiraFrames, range: IntRange, share: Boolean, video: Boolean,
@@ -133,6 +151,7 @@ class QueuedUgoiraFrameExports internal constructor(private val app: Context,
         var files = request.paths.map(::File)
         if (files.any { !it.isFile || it.length() <= 0 }) {
             if (request.offlineDir != null) throw IOException("离线快照原帧已不可用")
+            if (!manual.contains(context.plan.family) && !ceui.lisa.utils.DownloadLimitTypeUtil.autoStartAllowed()) context.yieldForPolicy()
             val refreshed = reload(gson.fromJson(request.illustJson, Illust::class.java))
             if (request.indices.any { it !in refreshed.files.indices }) throw IOException("原帧数量已改变")
             files = request.indices.map { refreshed.files[it] }

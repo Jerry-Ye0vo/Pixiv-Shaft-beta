@@ -64,7 +64,7 @@ class LocalOutputsTest {
     }
     private fun scenario(body: suspend CoroutineScope.() -> Unit): Unit = runBlocking { withTimeout(12_000, body) }
     private fun text() = LocalOutputRequest(type = QueuedLocalOutputs.CAPTION, subjectId = 123, content = "frozen caption", destination = destination)
-    private fun file(file: File) = LocalOutputRequest(type = QueuedLocalOutputs.BACKUP, subjectId = 0, sourcePath = file.absolutePath,
+    private fun file(file: File) = LocalOutputRequest(type = QueuedLocalOutputs.FILE, subjectId = 0, sourcePath = file.absolutePath,
         sourceBytes = file.length(), sourceModified = file.lastModified(), destination = destination)
     private suspend fun end(ticket: ContentPlanTicket) = ticket.status.first { it.state in ContentPlanTicket.OBSERVABLE_END }
     private suspend fun eventually(test: () -> Boolean) { withTimeout(5_000) { while (!test()) delay(10) } }
@@ -123,10 +123,10 @@ class LocalOutputsTest {
         val ticket = outputs.enqueue("producer", producer = token to Consumer { target ->
             calls.incrementAndGet()
             assertTrue(runtime.store.tasksPage("phase:", 0, Long.MAX_VALUE, 100).any { it.pool == Pool.COPY && it.state == State.RUNNING })
-            target.writeText("generated JSON")
+            target.writeText("{\"generated\":true}")
         }) { LocalOutputRequest(type = QueuedLocalOutputs.BACKUP, subjectId = 0, destination = destination,
             sourcePath = source.absolutePath, producer = token) }
-        assertEquals(State.SUCCEEDED, end(ticket).state); assertEquals(1, calls.get()); assertEquals("generated JSON", output.readText())
+        assertEquals(State.SUCCEEDED, end(ticket).state); assertEquals(1, calls.get()); assertEquals("{\"generated\":true}", output.readText())
     }
     @Test fun aColdUncapturedProducerFailsVisiblyInsteadOfPretendingToReplayACallback() = scenario {
         val request = LocalOutputRequest(type = QueuedLocalOutputs.BACKUP, subjectId = 0, destination = destination,
@@ -135,9 +135,21 @@ class LocalOutputsTest {
         assertEquals(State.FAILED, end(ticket).state); assertTrue(ticket.status.value.error!!.contains("重新导出"))
         assertEquals(0, opened.get())
     }
+    @Test fun aTruncatedBackupCannotBePublishedAsASuccessfulBackup() = scenario {
+        val file = File(directory, "partial.json").apply { writeText("{\"history\":[") }
+        val request = file(file).copy(type = QueuedLocalOutputs.BACKUP)
+        val ticket = outputs.enqueue("invalid-backup", file) { request }
+        assertEquals(State.FAILED, end(ticket).state); assertEquals(0, opened.get())
+    }
+    @Test fun anArrayBackupRemainsCompatibleWithOldMuteAndSynonymExports() = scenario {
+        val file = File(directory, "array.json").apply { writeText("[{\"id\":123}]") }
+        val request = file(file).copy(type = QueuedLocalOutputs.BACKUP)
+        val ticket = outputs.enqueue("array-backup", file) { request }
+        assertEquals(State.SUCCEEDED, end(ticket).state); assertEquals(file.readText(), output.readText())
+    }
     @Test fun pausingBeforePreparationStillAllowsTheSameProcessProducerToResume() = scenario {
         val held = occupy(); val source = File(directory, "generated"); val calls = AtomicInteger(); val token = UUID.randomUUID().toString()
-        val ticket = outputs.enqueue("producer", producer = token to Consumer { target -> calls.incrementAndGet(); target.writeText("JSON") }) {
+        val ticket = outputs.enqueue("producer", producer = token to Consumer { target -> calls.incrementAndGet(); target.writeText("{}") }) {
             LocalOutputRequest(type = QueuedLocalOutputs.BACKUP, subjectId = 0, destination = destination,
                 sourcePath = source.absolutePath, producer = token)
         }

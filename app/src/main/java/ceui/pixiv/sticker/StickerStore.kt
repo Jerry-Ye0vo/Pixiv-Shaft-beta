@@ -32,15 +32,16 @@ class StickerStore(private val root: File, private val event: (String) -> Unit =
         download: (StickerPackage, File, (Long) -> Unit) -> Unit,
         progress: (String, Long, Long) -> Unit,
         checkCancelled: () -> Unit = {},
+        writeStage: (() -> Unit) -> Unit = { it() },
     ): Ready {
         catalog.validate()
-        check(root.mkdirs() || root.isDirectory)
+        writeStage { check(root.mkdirs() || root.isDirectory) }
         val raw = gson.toJson(catalog)
         val generation = hash(raw.toByteArray())
         event("verify_start generation=$generation root=${root.path} packages=${catalog.packages().size}")
         // This is the global gate. A partial/repaired generation cannot remain ready.
         val readyMarker = File(root, "ready.json")
-        if (readyMarker.exists() && !readyMarker.delete()) throw IOException("Cannot invalidate sticker marker")
+        writeStage { if (readyMarker.exists() && !readyMarker.delete()) throw IOException("Cannot invalidate sticker marker") }
         event("gate_closed marker=${readyMarker.path}")
         val packages = catalog.packages()
         val total = packages.sumOf { it.size }
@@ -49,7 +50,7 @@ class StickerStore(private val root: File, private val event: (String) -> Unit =
         for (pkg in packages) {
             checkCancelled()
             val dir = File(root, "packages/${pkg.sha256}")
-            check(dir.mkdirs() || dir.isDirectory)
+            writeStage { check(dir.mkdirs() || dir.isDirectory) }
             val zip = File(dir, "archive.zip")
             val downloaded = File(dir, "downloaded.json")
             val extracted = File(dir, "extracted.json")
@@ -57,26 +58,27 @@ class StickerStore(private val root: File, private val event: (String) -> Unit =
             val zipValid = zip.isFile && zip.length() == pkg.size && hash(zip, checkCancelled) == pkg.sha256
             event("zip_check path=${zip.path} valid=$zipValid expected_bytes=${pkg.size}")
             if (!zipValid) {
-                extracted.delete()
-                downloaded.delete()
                 val partial = File(dir, "archive.zip.part")
-                partial.delete()
+                writeStage { extracted.delete(); downloaded.delete(); partial.delete() }
                 try {
                     progress("download", completed, total)
                     event("download_start url=${StickerDownloadSource.url(pkg)} destination=${partial.path}")
                     download(pkg, partial) { bytes -> checkCancelled(); progress("download", completed + bytes, total) }
-                    check(partial.length() == pkg.size && hash(partial, checkCancelled) == pkg.sha256) { "Sticker ZIP checksum mismatch" }
-                    check(partial.renameTo(zip)) { "Cannot commit sticker ZIP" }
+                    writeStage {
+                        check(partial.length() == pkg.size && hash(partial, checkCancelled) == pkg.sha256) { "Sticker ZIP checksum mismatch" }
+                        check(partial.renameTo(zip)) { "Cannot commit sticker ZIP" }
+                    }
                     event("download_verified file=${zip.path} bytes=${pkg.size} sha256=${pkg.sha256}")
                 } finally {
-                    partial.delete()
+                    writeStage { partial.delete() }
                 }
             }
             // Retain both the ZIP and its marker, including after extraction.
-            atomicWrite(downloaded, gson.toJson(pkg))
+            writeStage { atomicWrite(downloaded, gson.toJson(pkg)) }
             event("download_marker path=${downloaded.path}")
             progress("extract", completed, total)
             if (!validExtraction(extracted, files, pkg, checkCancelled)) {
+                writeStage {
                 event("extract_start zip=${zip.path} destination=${files.path}")
                 extracted.delete()
                 if (files.exists()) check(files.deleteRecursively()) { "Cannot clear incomplete extraction" }
@@ -122,6 +124,7 @@ class StickerStore(private val root: File, private val event: (String) -> Unit =
                 require(records.isNotEmpty())
                 atomicWrite(extracted, gson.toJson(Extraction(pkg.sha256, records)))
                 event("extract_verified files=${records.size} bytes=$expanded marker=${extracted.path}")
+                }
             } else {
                 event("extract_reused marker=${extracted.path}")
             }
@@ -133,9 +136,11 @@ class StickerStore(private val root: File, private val event: (String) -> Unit =
         }
         val images = resolveImages(catalog)
         checkCancelled()
-        atomicWrite(File(root, "catalog.json"), raw)
-        // The only operation which opens the panel gate, after all ZIPs AND files.
-        atomicWrite(readyMarker, generation)
+        writeStage {
+            atomicWrite(File(root, "catalog.json"), raw)
+            // The only operation which opens the panel gate, after all ZIPs AND files.
+            atomicWrite(readyMarker, generation)
+        }
         event("gate_ready generation=$generation packages=${packages.size} stickers=${images.size} marker=${readyMarker.path}")
         progress("ready", total, total)
         return Ready(generation, catalog, images, inventory)
@@ -279,3 +284,4 @@ class StickerStore(private val root: File, private val event: (String) -> Unit =
         }
     }
 }
+

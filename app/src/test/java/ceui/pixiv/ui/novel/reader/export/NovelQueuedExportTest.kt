@@ -31,6 +31,7 @@ class NovelQueuedExportTest {
     private lateinit var output: File
     private val gson = Gson()
     private val recorded = mutableListOf<Long>()
+    private var autoAllowed = true
     @Before fun setup() {
         runtime = ContentQueueRuntime(app, database); queue = ContentPlanQueue(runtime, 1)
         output = File(app.cacheDir, "novel-${UUID.randomUUID()}")
@@ -42,13 +43,24 @@ class NovelQueuedExportTest {
             override fun finishRecovered(uri: String, destination: CopyDestination) {}
             override fun available(intent: CopyIntent) = output.isFile
         }
-        QueuedNovelExports(app, queue, ContentPhaseRunner(runtime) { 1 }, provider) { novel, _ -> recorded += novel.id }
+        QueuedNovelExports(app, queue, ContentPhaseRunner(runtime) { 1 }, provider, autoAllowed = { autoAllowed }) { novel, _ -> recorded += novel.id }
     }
     @After fun teardown() {
         runBlocking { queue.shutdown() }; runtime.close(); app.deleteDatabase(database); output.delete()
         File(app.filesDir, "content_novel_inputs").deleteRecursively()
     }
     private fun scenario(block: suspend CoroutineScope.() -> Unit): Unit = runBlocking { withTimeout(12_000, block) }
+    @Test fun aRestoredNetworkExportWaitsForPolicyAndManualResumeReleasesOnlyItsOwnTask() = scenario {
+        autoAllowed = false
+        val spec = request(ExportFormat.Epub)
+        val first = queue.submit("first-export", "novel-export") { gson.toJson(spec) }
+        val second = queue.submit("second-export", "novel-export") { gson.toJson(spec) }
+        withTimeout(3000) { while (queue.store.get(first.id) == null || queue.store.get(second.id) == null) delay(10) }
+        assertEquals(State.QUEUED, queue.store.get(first.id).state); assertFalse(output.exists())
+        queue.resume(first.id)
+        assertEquals(State.SUCCEEDED, first.status.first { it.state == State.SUCCEEDED || it.state == State.FAILED }.state)
+        assertEquals(State.QUEUED, queue.store.get(second.id).state)
+    }
     private fun request(format: ExportFormat, legacy: Boolean = false, merged: ExportMerged? = null): NovelExportRequest =
         NovelExportRequest(format = format.name, novelJson = if (merged == null) "{\"id\":123,\"title\":\"Book\"}" else null,
             novelId = if (merged == null) 123 else 0, webJson = if (merged == null) "{\"id\":\"123\",\"title\":\"Book\",\"text\":\"body\"}" else null,

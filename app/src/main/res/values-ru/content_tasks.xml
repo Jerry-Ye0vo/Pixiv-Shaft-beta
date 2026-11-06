@@ -1,0 +1,19 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="content_task_choose_format">Выберите формат экспорта</string>
+    <string name="content_task_processing">Обработка продолжится после выхода со страницы</string>
+    <string name="content_task_persisted">Задача сохранена</string>
+    <string name="content_task_running">Выполняется</string>
+    <string name="content_task_paused">Приостановлено</string>
+    <string name="content_task_failed">Ошибка</string>
+    <string name="content_task_done">Завершено</string>
+    <string name="content_task_cancelled">Отменено</string>
+    <string name="content_task_stopping">Остановка</string>
+    <string name="content_task_waiting">Ожидание</string>
+    <string name="content_task_resume">Продолжить</string>
+    <string name="content_task_pause">Пауза</string>
+    <string name="content_task_cancel">Отменить задачу</string>
+    <string name="content_task_recent">Недавние задачи</string>
+    <string name="content_task_finish_partial">Остановить загрузку и сохранить полученные главы</string>
+    <string name="content_task_recent_empty">Других недавних задач нет</string>
+</resources>

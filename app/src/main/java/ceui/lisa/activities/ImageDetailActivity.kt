@@ -910,7 +910,7 @@ class ImageDetailActivity : BaseActivity<ActivityImageDetailBinding?>() {
                 }
             } else {
                 IllustDownload.downloadIllustPagesWithResolution(
-                    illust, intArrayOf(page), Params.IMAGE_RESOLUTION_ORIGINAL, this,
+                    illust, intArrayOf(page), IllustDownload.defaultImageResolution(), this,
                 )
                 autoLikeAfterDownloadIfNeeded(illust, fabBar)
             }
@@ -1683,4 +1683,5 @@ class ImageDetailActivity : BaseActivity<ActivityImageDetailBinding?>() {
         const val EXTRA_ENTER_BOUNDS = "enter_bounds"
     }
 }
+
 
