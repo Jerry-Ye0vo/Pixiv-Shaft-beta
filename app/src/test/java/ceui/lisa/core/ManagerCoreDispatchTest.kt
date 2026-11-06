@@ -74,7 +74,7 @@ class ManagerCoreDispatchTest {
     }
     @Test fun manualStartRequiresCommittedLeaseAndCannotExceedCapacity() {
         val a = item(1); val b = item(2)
-        manager.addTasks(listOf(a,b)); cycle()
+        manager.addTask(a); manager.addTask(b); cycle()
         manager.startOne(a.uuid); manager.startOne(b.uuid); cycle()
         assertEquals(listOf(a), started)
         manager.stopOne(a.uuid); cycle()
@@ -99,10 +99,23 @@ class ManagerCoreDispatchTest {
         Shaft.sSettings.maxConcurrentDownloads = 3
         val a = item(1); val b = item(2, a.url)
         // Normal admission deduplicates artwork/page/output; these are distinct pages sharing bytes.
-        manager.addTasks(listOf(a,b)); cycle()
+        manager.addTask(a); manager.addTask(b); cycle()
         manager.startAll(); cycle()
         assertEquals(listOf(a), started)
         manager.stopOne(a.uuid); cycle(); exit(a)
         assertEquals(listOf(a,b), started)
     }
+    @Test fun failedWorkerDoesNotBlockTheNextRequestedPage() {
+        val a = item(1); val b = item(2)
+        manager.addTask(a); manager.addTask(b); cycle()
+        manager.startOne(a.uuid); manager.startOne(b.uuid); cycle()
+        ReflectionHelpers.callInstanceMethod<Void>(manager, "complete",
+            ReflectionHelpers.ClassParameter.from(DownloadItem::class.java, a),
+            ReflectionHelpers.ClassParameter.from(Boolean::class.javaPrimitiveType!!, false))
+        cycle()
+        assertEquals(State.FAILED, owner.store.get(PageQueueOwner.id(a)).state)
+        assertEquals(listOf(a,b), started)
+        assertNotNull(db.downloadDao().getDownloadingByFileName(a.name))
+    }
+
 }

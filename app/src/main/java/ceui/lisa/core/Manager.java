@@ -208,6 +208,7 @@ public class Manager {
                     blockedClaims.clear();
                     if (stopped && !item.isFailed() && !item.isSuccess()) item.setState(DownloadItem.DownloadState.INIT);
                 }
+                PageQueueDiagnostics.event("worker-acknowledged", item);
                 ManagerReactive.invalidate();
                 postMain(this::pumpAvailableSlots);
             } catch (Throwable t) {
@@ -290,6 +291,7 @@ public class Manager {
     private Manager() {
         uuid = "";
         currentIllustID = 0;
+        IO.execute(() -> PageQueueDiagnostics.previousExits(mContext));
     }
 
     /**
@@ -480,6 +482,7 @@ public class Manager {
     /** Called under this monitor. Memory reservation is not execution authorization. */
     private void safeAdd(DownloadItem item) {
         content.add(item);
+        PageQueueDiagnostics.event("submit", item);
         if (restoreLiveKeys != null) restoreLiveKeys.add(PageQueuePersistence.key(item));
         scheduleAdmission(item);
     }
@@ -493,6 +496,7 @@ public class Manager {
                     if (pendingPersistence.get(item.getUuid()) != ticket || !content.contains(item)) return;
                 }
                 pageQueue.admit(AppDatabase.getAppDatabase(mContext), Shaft.sGson, item);
+                PageQueueDiagnostics.event("admitted", item);
                 synchronized (this) {
                     if (pendingPersistence.get(item.getUuid()) == ticket) persistenceFailures.remove(item.getUuid());
                 }
@@ -1015,6 +1019,7 @@ public class Manager {
                 int capacity = Math.max(1, Math.min(5, Shaft.sSettings.getMaxConcurrentDownloads()));
                 ceui.pixiv.download.queue.ContentQueueStore.Task lease = pageQueue.claim(next, capacity);
                 if (lease == null) {
+                    PageQueueDiagnostics.event("waiting-for-permit", next);
                     synchronized (this) {
                         dispatching.remove(next.getUuid());
                         next.setState(DownloadItem.DownloadState.INIT);
@@ -1024,6 +1029,7 @@ public class Manager {
                     return;
                 }
                 leases.put(next.getUuid(), lease);
+                PageQueueDiagnostics.event("claimed", next);
                 postMain(() -> {
                     synchronized (Manager.this) {
                         if (!canContinueAttempt(next)) { workerTerminated(next); return; }
@@ -1132,6 +1138,7 @@ public class Manager {
                     factory = new SAFactory(context, downloadItem);
                 }
             } catch (Exception e) {
+                PageQueueDiagnostics.failure("factory-init", downloadItem, e);
                 Common.showLog("[DL] factory init failed: " + e);
                 e.printStackTrace();
                 postMain(() -> {
@@ -1207,6 +1214,7 @@ public class Manager {
                 try {
                     opened = factory.insert();
                 } catch (Exception e) {
+                    PageQueueDiagnostics.failure("factory-insert", downloadItem, e);
                     Common.showLog("[DL] factory.insert() failed: " + e);
                     e.printStackTrace();
                     // insert() 内部已自带 cleanup（MediaStoreBackend 在 openOutputStream
@@ -1301,6 +1309,7 @@ public class Manager {
                                 mContext.getString(R.string.aria2_task_sent, downloadItem.getName())));
             }
         }, throwable -> {
+            PageQueueDiagnostics.failure("aria2", downloadItem, throwable);
             Common.showLog("[ARIA2] dispatch failed: " + throwable);
             if (!downloadItem.isSilent()) {
                 DownloadToasts.show(DownloadToastKind.ARIA2, mContext.getString(
@@ -1313,6 +1322,12 @@ public class Manager {
         });
         registerHandle(itemUuid, d);
         d.start(IO);
+    }
+
+    /** Called before publishing/removing a completed page. Failed visibility commit retains staging. */
+    static void finishPageOutput(DownloadFileFactory factory, File stageDir, String stageKey) {
+        factory.finishWrite();
+        if (stageDir != null) StageStore.clear(stageDir, stageKey);
     }
 
     private void startDownloadChain(Context context, DownloadItem downloadItem,
@@ -1445,19 +1460,11 @@ public class Manager {
         s -> {
             Common.showLog("downloadOne " + s);
 
-            // ===== CRITICAL: 把 content.remove 提到最前 =====
-            // QueueDownloadManager.awaitIllustSettled 是靠"item 从 Manager.content
-            // 消失"判断 illust 完成的。下面的 Gson 序列化 / Room insert /
-            // factory.finishWrite() / complete() 任何一行 throw 都会让原本在
-            // 末尾 schedule 的 content.remove **永远不会被 queue 上 main 线程**。
-            // 单页文件已经写盘成功（一行字节流早就 flush 了），但 await 看到这个
-            // page 还在 content 里 → 永远不 return → consumer 走不到
-            // dao.updateStatus(SUCCESS) → 批量队列 list 不消失，最终 stall
-            // timeout 把它标 FAILED（FAILED 行 SQL 也不过滤，list 仍然不消失）。
-            // 用户看到的就是"图都下成功了 但队列不少"。
-            //
-            // 把 remove 排到最前面，独立 Runnable，跟后续 IO 工作解耦：哪怕后面
-            // 任何步骤 throw，main thread 都已经把这条 item 从 content 取出了。
+            // Commit storage visibility before publishing success or removing the active row.
+            // Throwing here reaches DownloadTask.onError and keeps this page visible as FAILED.
+            // A failed commit retains its stage for retry and must never produce a core success tombstone.
+            finishPageOutput(factory, stageDir, stageKey);
+
             postMain(() -> {
                 int sizeBefore;
                 boolean removed;
@@ -1478,9 +1485,8 @@ public class Manager {
                     PixivOperate.unzipAndPlay(context, downloadItem.getIllust(), downloadItem.isAutoSave()));
             }
 
-            // 下面三块每块独立 try/catch：单条失败别牵连其它。最关键的 content.remove
-            // 已经在上面发出去了，这里都是"附加完成动作"，断了任意一条都不至于让
-            // 整个 illust 的下载流程卡死。
+            // Storage commit succeeded. Record enrichment failures do not invalidate the file;
+            // each is isolated so the queue can acknowledge successful output.
             DownloadEntity downloadEntity = null;
             // 动图这条 DownloadItem 下的是 app cache 里的中间 zip
             // （Android10DownloadFactory22 → LegacyFile.gifZipFile），不是用户拿到的成品。
@@ -1532,17 +1538,6 @@ public class Manager {
                 }
             }
 
-            try {
-                factory.finishWrite();
-                // staged 的 stage（.part + manifest）在 finishWrite 成功后才清：清早了，
-                // dispose 恰好丢弃这条 onNext 时（observeOn 跳变窗口）目标行悬挂 pending、
-                // stage 又没了，冷启动 cleaner 会把写满的文件当孤儿删掉 → 整段重下。
-                // finishWrite 抛错时同理保留 stage —— pending 行终会被 cleaner 回收，
-                // 下次尝试凭完整 stage 走 skipNetwork 直接重新 commit。clear 幂等。
-                if (staged) {
-                    StageStore.clear(stageDir, stageKey);
-                }
-            } catch (Throwable t) { Common.showLog("[DL] finishWrite failed: " + t); }
             // 可选:把作品标签写进 JPEG 的 XMP 关键词(issue #938)。开关默认关,只处理 JPEG,
             // 内部包 try/catch —— 写元数据失败绝不影响这条已成功的下载。gif 会被扩展名过滤掉。
             // 开关前置判断:默认关时这条下载热路径零额外开销(不建 tag 列表、不读文件)。
@@ -1582,6 +1577,7 @@ public class Manager {
             });
         }, throwable -> {
             //下载失败，处理相关逻辑
+            PageQueueDiagnostics.failure("transfer-or-commit", downloadItem, throwable);
             Common.showLog("Manager download error: " + throwable.getMessage());
 
             if (!downloadItem.isSilent()) {
