@@ -25,6 +25,7 @@ class ContentQueueRuntime(context: Context, name: String) : java.io.Closeable {
         }
     }
     fun addListener(listener: Runnable) { listeners.add(listener) }
+    fun removeListener(listener: Runnable) { listeners.remove(listener) }
     fun changed() {
         signal.update { it + 1 }
         listeners.forEach { listener ->

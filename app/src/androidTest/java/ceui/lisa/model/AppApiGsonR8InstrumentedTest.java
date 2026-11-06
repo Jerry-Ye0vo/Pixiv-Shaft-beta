@@ -25,6 +25,8 @@ import java.util.List;
 import java.util.Map;
 
 import ceui.lisa.core.DownloadItem;
+import ceui.pixiv.download.copy.CopyIntent;
+import ceui.pixiv.download.queue.ContentPhaseRunner;
 import ceui.pixiv.api.API;
 import ceui.pixiv.api.model.Illust;
 import ceui.pixiv.cache.ObjectPool;
@@ -53,6 +55,41 @@ import retrofit2.http.GET;
 /** Guards App API wire fields and Retrofit response signatures in the minified release APK. */
 @RunWith(AndroidJUnit4.class)
 public final class AppApiGsonR8InstrumentedTest {
+
+    @Test
+    public void unifiedDownloadV1InputsAndReceiptsKeepTheirPersistedSchemaInRelease() throws Exception {
+        Object intent = parseWire(CopyIntent.class, """
+                {"version":1,"request":{"kind":"translation","subjectId":123,"page":2,
+                  "sourcePath":"/data/local/tmp/translated.png","sourceSize":123,"sourceModified":456,
+                  "contextJson":"{}","submittedAt":789,"destination":{"storage":"cache",
+                    "segments":["translated.png"],"mime":"image/png","policy":"Rename"}},
+                  "snapshotName":"owned.source","sourceHash":"sha256","sourceBytes":123,
+                  "receiptUri":"content://media/external/images/media/123","skipped":false,"outputCommitted":true}
+                """);
+        assertEquals(1, wireField(intent, "version"));
+        Object request = wireField(intent, "request");
+        assertEquals(123L, wireField(request, "subjectId"));
+        assertEquals(2, wireField(request, "page"));
+        Object destination = wireField(request, "destination");
+        assertEquals("cache", wireField(destination, "storage"));
+        assertEquals("Rename", wireField(destination, "policy"));
+        assertEquals("translated.png", ((List<?>) wireField(destination, "segments")).get(0));
+        JSONObject persisted = new JSONObject(encodeWire(intent));
+        assertEquals("sha256", persisted.getString("sourceHash"));
+        assertEquals(123L, persisted.getLong("sourceBytes"));
+        assertTrue(persisted.getBoolean("outputCommitted"));
+        assertEquals("image/png", persisted.getJSONObject("request").getJSONObject("destination").getString("mime"));
+        Object restored = parseWire(CopyIntent.class, persisted.toString());
+        assertEquals("content://media/external/images/media/123", wireField(restored, "receiptUri"));
+
+        Object phase = parseWire(ContentPhaseRunner.Intent.class,
+                "{\"version\":1,\"owner\":\"ugoira\",\"phase\":\"zip\",\"resource\":\"target\",\"context\":\"{}\",\"submittedAt\":42}");
+        JSONObject phaseJson = new JSONObject(encodeWire(phase));
+        assertEquals("ugoira", phaseJson.getString("owner"));
+        assertEquals("zip", phaseJson.getString("phase"));
+        assertEquals("target", phaseJson.getString("resource"));
+        assertEquals(42L, phaseJson.getLong("submittedAt"));
+    }
 
     @Test
     public void listIllustWireFieldsSurviveR8() throws Exception {
@@ -326,3 +363,4 @@ public final class AppApiGsonR8InstrumentedTest {
         return lowerBounds.length == 1 ? lowerBounds[0] : wildcard.getUpperBounds()[0];
     }
 }
+

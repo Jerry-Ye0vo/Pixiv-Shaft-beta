@@ -38,16 +38,18 @@ public final class ContentQueueStore extends SQLiteOpenHelper {
     }
     public ContentQueueStore(Context context) { this(context, "content_queue.db"); }
     public ContentQueueStore(Context context, String databaseName) {
-        super(context.getApplicationContext(), databaseName, null, 1);
+        super(context.getApplicationContext(), databaseName, null, 2);
     }
     @Override public void onCreate(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE tasks (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, output_key TEXT NOT NULL, resource_key TEXT NOT NULL, pool TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL, attempt TEXT, error TEXT)");
         db.execSQL("CREATE INDEX tasks_ready ON tasks(pool,state,seq)");
         db.execSQL("CREATE INDEX tasks_output ON tasks(output_key,state)");
         db.execSQL("CREATE INDEX tasks_resource ON tasks(resource_key,state)");
+        ContentPlanStore.createSchema(db);
     }
     @Override public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
-        throw new IllegalStateException("Explicit content queue migration required");
+        if (oldVersion == 1 && newVersion == 2) ContentPlanStore.createSchema(db);
+        else throw new IllegalStateException("Explicit content queue migration required");
     }
     private interface Transaction<T> { T run(SQLiteDatabase db); }
     private <T> T transaction(Transaction<T> action) {
@@ -153,6 +155,7 @@ public final class ContentQueueStore extends SQLiteOpenHelper {
     public void recoverAfterProcessDeath() {
         transaction(db -> {
             db.execSQL("UPDATE tasks SET state=CASE state WHEN 'PAUSE_REQUESTED' THEN 'PAUSED' WHEN 'CANCEL_REQUESTED' THEN 'CANCELLED' WHEN 'COMMITTED' THEN 'SUCCEEDED' WHEN 'FAILING' THEN 'FAILED' ELSE 'QUEUED' END, attempt=NULL WHERE state IN " + LIVE);
+            ContentPlanStore.recover(db);
             return null;
         });
     }
