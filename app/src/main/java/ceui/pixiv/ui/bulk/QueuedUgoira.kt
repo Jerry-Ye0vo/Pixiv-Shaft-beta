@@ -165,6 +165,15 @@ class QueuedUgoira internal constructor(private val app: Context,
                 (if (domain.video) request.video else request.gif).relativePath().filename)
         }
     }
+    override suspend fun reconcile(plan: ContentPlanStore.Plan): Boolean {
+        val request = gson.fromJson(plan.request, UgoiraSaveRequest::class.java)
+        val saved = gson.fromJson(plan.checkpoint, ArtifactCheckpoint::class.java)
+        if (saved.receipt == null) return false
+        val domain = gson.fromJson(saved.domain, UgoiraSaveDomain::class.java)
+        val destination = if (domain.video) request.video else request.gif
+        val illust = gson.fromJson(request.illustJson, Illust::class.java)
+        return publisher.reconcile(plan, destination) { record(illust, it, domain.video, destination.relativePath().filename) }
+    }
     override suspend fun cleanup(plan: ContentPlanStore.Plan, state: State) {
         if (state !in setOf(State.SUCCEEDED, State.CANCELLED)) return
         phases.run(plan.id, "ugoira-cleanup", "ugoira-input:${plan.id}", Pool.COPY) {

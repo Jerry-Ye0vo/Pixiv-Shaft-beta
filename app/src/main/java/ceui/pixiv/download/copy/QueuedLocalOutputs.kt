@@ -100,6 +100,10 @@ class QueuedLocalOutputs internal constructor(private val app: Context,
         val resolved = DownloadsRegistry.store.loadOrFallback().resolve(bucket)
         return CopyDestination.capture(resolved.storage, path, mime, resolved.overwrite)
     }
+    override suspend fun reconcile(plan: ContentPlanStore.Plan): Boolean {
+        val request = gson.fromJson(plan.request, LocalOutputRequest::class.java)
+        return publisher.reconcile(plan, request.destination) { recorded(request, it) }
+    }
     override suspend fun execute(context: ContentPlanContext) {
         val request = gson.fromJson(context.plan.request, LocalOutputRequest::class.java)
         require(request.version == 1 && request.type in TYPES)

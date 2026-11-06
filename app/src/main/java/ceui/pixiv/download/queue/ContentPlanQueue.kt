@@ -74,8 +74,12 @@ class ContentPlanQueue(
         if (old == null) commands.trySend {
             for (state in listOf(State.SUCCEEDED, State.CANCELLED)) {
                 for (plan in store.recent(handler.kind, state, 128).asReversed()) {
-                    cleanup(handler, plan, state)
-                    if (!tickets.containsKey(plan.id)) restore(plan)
+                    val settled = settleCancelled(handler, plan)
+                    if (settled.state in setOf(State.SUCCEEDED, State.CANCELLED)) cleanup(handler, settled, settled.state)
+                    if (!tickets.containsKey(plan.id)) restore(settled)
+                    else if (settled.state != plan.state) tickets[plan.id]?.let {
+                        it.reset(settled.state); it.publish(settled.state, settled.error); publish(it)
+                    }
                 }
             }
             trim()
@@ -228,7 +232,12 @@ class ContentPlanQueue(
                 continue
             }
             if (plan.state in setOf(State.CANCELLED, State.PAUSED, State.FAILED)) {
-                if (plan.state == State.CANCELLED) handlers[plan.kind]?.let { cleanup(it, plan, plan.state) }
+                if (plan.state == State.CANCELLED) handlers[plan.kind]?.let {
+                    val settled = settleCancelled(it, plan)
+                    if (settled.state != plan.state) ticket.reset(settled.state)
+                    plan = settled
+                    if (plan.state in setOf(State.CANCELLED, State.SUCCEEDED)) cleanup(it, plan, plan.state)
+                }
                 ticket.finished(plan.state); ticket.publish(plan.state, plan.error); publish(ticket)
                 continue
             }
@@ -297,6 +306,18 @@ class ContentPlanQueue(
         tickets[plan.id]?.let { it.publish(plan.state, error.message); publish(it) }
         Timber.tag("ContentQueue").w(error, "Parent eligibility unavailable %s", plan.id)
         false
+    }
+    private suspend fun settleCancelled(handler: ContentPlanHandler, plan: ContentPlanStore.Plan): ContentPlanStore.Plan {
+        if (plan.state != State.CANCELLED || plan.checkpoint == "{}") return plan
+        try {
+            if (withContext(executing.asContextElement("reconcile:" + plan.id)) { handler.reconcile(plan) })
+                check(store.reconcileCancelled(plan.id, plan.checkpoint, true, null))
+        } catch (error: Exception) {
+            if (error is CancellationException) throw error
+            store.reconcileCancelled(plan.id, plan.checkpoint, false, "已写入产物校验失败，请恢复权限后重试：${error.message}")
+            Timber.tag("ContentQueue").w(error, "Cancelled output reconciliation retained its inputs")
+        }
+        return requireNotNull(store.get(plan.id))
     }
     private fun publish(ticket: ContentPlanTicket) { mutable.update { it + (ticket.id to ticket.status.value) } }
     private suspend fun cleanup(handler: ContentPlanHandler, plan: ContentPlanStore.Plan, state: State) {

@@ -16,6 +16,8 @@ interface ContentPlanHandler {
     /** Cheap admission predicate; a policy change must call refreshEligibility, not poll per plan. */
     fun canRun(plan: ContentPlanStore.Plan): Boolean = true
     suspend fun execute(context: ContentPlanContext)
+    /** Validate a physically finished output before retiring a cold, cancelled intention. No new output. */
+    suspend fun reconcile(plan: ContentPlanStore.Plan): Boolean = false
     /** Only remove inputs owned by this plan; completed output and old library records are separate. */
     suspend fun cleanup(plan: ContentPlanStore.Plan, state: ContentQueueStore.State) {}
 }

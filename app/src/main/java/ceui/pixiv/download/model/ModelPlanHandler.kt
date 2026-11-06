@@ -42,6 +42,13 @@ internal class ModelPlanHandler(
             }.getOrDefault(false))
     }
 
+    override suspend fun reconcile(plan: ContentPlanStore.Plan): Boolean {
+        val request = request(plan)
+        if (request.operation == ModelRequest.DELETE) return false
+        return phases.run(plan.id, "model-reconcile", "model-install:${request.directory}/${request.asset}", Pool.COPY) {
+            ModelInstaller(app.filesDir, request, plan.id, plan.request).installed()
+        }
+    }
     override suspend fun execute(context: ContentPlanContext) {
         val plan = context.plan
         val request = request(plan)

@@ -43,6 +43,7 @@ class ArtifactPublisherTest {
     private var writing: CountDownLatch? = null
     private var release: CountDownLatch? = null
     private val destination = CopyDestination("cache", segments = listOf("book.txt"), mime = "text/plain", policy = "Rename")
+    private lateinit var publisher: ArtifactPublisher
     @Before fun setup() {
         runtime = ContentQueueRuntime(app, database); queue = ContentPlanQueue(runtime, 1)
         source = File(app.filesDir, "source-${UUID.randomUUID()}").apply { writeText("complete artifact") }
@@ -69,9 +70,16 @@ class ArtifactPublisherTest {
                     }
                 }, onFinish = {}, onAbort = { aborted.incrementAndGet() })
         }
-        val publisher = ArtifactPublisher(ContentPhaseRunner(runtime) { 1 }, provider)
+        publisher = ArtifactPublisher(ContentPhaseRunner(runtime) { 1 }, provider)
+        register()
+    }
+    private fun register() {
         queue.register(object : ContentPlanHandler {
             override val kind = "artifact"
+            override suspend fun reconcile(plan: ContentPlanStore.Plan) = publisher.reconcile(plan, destination) {
+                if (failRecord) throw IOException("history-write")
+                recorded.incrementAndGet()
+            }
             override suspend fun execute(context: ContentPlanContext) {
                 publisher.publish(context, source, destination) {
                     if (failRecord) throw IOException("history-write")
@@ -85,6 +93,27 @@ class ArtifactPublisherTest {
     private fun submit() = queue.submit("book", "artifact") { "{\"version\":1}" }
     private suspend fun end(ticket: ContentPlanTicket) = withTimeout(8_000) { ticket.status.first { it.state in ContentPlanTicket.OBSERVABLE_END } }
     private suspend fun eventually(test: () -> Boolean) { withTimeout(5_000) { while (!test()) delay(10) } }
+    @Test fun cancellingAfterAnUnacknowledgedPhysicalOutputReconcilesInsteadOfLosingItsHistory() = scenario {
+        failRecord = true
+        val ticket = submit(); assertEquals(State.FAILED, end(ticket).state)
+        failRecord = false; assertTrue(ticket.cancel())
+        ticket.status.first { it.state == State.SUCCEEDED }
+        assertEquals(1, opened.get()); assertEquals(1, recorded.get()); assertEquals(source.readText(), output.readText())
+    }
+    @Test fun aChangedOutputNeverPassesReconciliationOrGetsOverwrittenByCancellation() = scenario {
+        failRecord = true; val ticket = submit(); assertEquals(State.FAILED, end(ticket).state)
+        output.writeText("unrelated bytes"); failRecord = false; ticket.cancel()
+        ticket.status.first { it.state == State.CANCELLED }
+        assertEquals("unrelated bytes", output.readText()); assertEquals(0, recorded.get()); assertEquals(1, opened.get())
+    }
+    @Test fun aColdCancelledReceiptIsValidatedWithoutGeneratingOrOpeningAnotherOutput() = scenario {
+        val original = submit(); assertEquals(State.SUCCEEDED, end(original).state)
+        queue.shutdown()
+        runtime.store.writableDatabase.execSQL("UPDATE plans SET state='CANCELLED',attempt=NULL WHERE id=?", arrayOf(original.id))
+        queue = ContentPlanQueue(runtime, 1); register(); queue.ready.await()
+        eventually { queue.ticket(original.id)?.status?.value?.state == State.SUCCEEDED }
+        assertEquals(1, opened.get()); assertEquals(2, recorded.get())
+    }
     @Test fun aSaturatedCopyPoolDoesNotOpenAProviderAndAcceptedCancellationNeverWrites() = scenario {
         runtime.initialize(); val id = runtime.store.enqueue("blocker", "blocker", Pool.COPY, "{}"); val lease = runtime.store.claim(id, Pool.COPY, 1)!!
         val ticket = submit(); eventually { runtime.store.tasksPage("phase:", 0, Long.MAX_VALUE, 20).isNotEmpty() }

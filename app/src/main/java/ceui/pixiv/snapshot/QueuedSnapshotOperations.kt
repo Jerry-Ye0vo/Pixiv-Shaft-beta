@@ -260,6 +260,43 @@ class QueuedSnapshotOperations internal constructor(private val app: Context,
             }
         }
     }
+    override suspend fun reconcile(plan: ContentPlanStore.Plan): Boolean {
+        val request = request(plan)
+        val outer = gson.fromJson(plan.checkpoint, ArtifactCheckpoint::class.java)
+        if (request.operation in setOf(EXPORT, EXPORT_TREE)) {
+            val name = requireNotNull(request.fileName)
+            val destination = CopyDestination("cache", segments = listOf("explicit-snapshot",
+                hash(request.uri.orEmpty() + request.tree.orEmpty()), name), mime = "application/zip", policy = "Replace")
+            return ArtifactPublisher(phases, DocumentCopyOutput(app, request.uri, request.tree, name, "application/zip"))
+                .reconcile(plan, destination)
+        }
+        val saved = runCatching { gson.fromJson(outer.domain, SnapshotOperationState::class.java) }.getOrNull() ?: return false
+        if (!saved.prepared) return false
+        val manifest = saved.manifestJson?.let { gson.fromJson(it, SnapshotManifest::class.java) }
+        val id = request.snapshotId ?: manifest?.snapshotId ?: return false
+        return ContentResourceLeases.write("snapshot:$id") {
+            phases.run(plan.id, "snapshot-operation-reconcile", "snapshot-manifest:$id", Pool.COPY) {
+                val target = SnapshotRepository.dir(app, id)
+                when (request.operation) {
+                    DELETE -> if (target.exists()) false else { SnapshotRuntimeCache.remove(id); SnapshotIndex.onSnapshotDeleted(id); true }
+                    IMPORT -> if (manifest != null && matches(target, saved.files)) { register(manifest); true } else false
+                    PROMOTE, RECOVER -> {
+                        val file = File(target, SNAPSHOT_MANIFEST)
+                        if (manifest == null || !file.isFile || file.readText() != saved.manifestJson) false
+                        else {
+                            SnapshotValidator.validateContents(target, manifest)
+                            if (request.operation == PROMOTE) {
+                                val auto = File(target, AUTO_SNAPSHOT_MANIFEST)
+                                if (auto.exists() && !auto.delete()) throw IOException("Cannot finish snapshot promotion")
+                            }
+                            register(manifest); true
+                        }
+                    }
+                    else -> false
+                }
+            }
+        }
+    }
     override suspend fun cleanup(plan: ContentPlanStore.Plan, state: State) {
         if (state !in setOf(State.SUCCEEDED, State.CANCELLED)) return
         val old = File(SnapshotRepository.root(app), ".queue-import-${hash(plan.id)}.old")

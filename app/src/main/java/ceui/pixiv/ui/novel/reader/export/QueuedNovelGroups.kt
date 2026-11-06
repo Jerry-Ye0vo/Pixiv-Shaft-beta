@@ -175,6 +175,11 @@ class QueuedNovelGroups internal constructor(private val app: Context,
         state.complete = true; save()
         context.commit {}
     }
+    override suspend fun reconcile(plan: ContentPlanStore.Plan): Boolean {
+        val saved = gson.fromJson(plan.checkpoint, NovelGroupState::class.java)
+        val children = queue.store.children(plan.id)
+        return saved.complete && children.isNotEmpty() && children.all { it.state == State.SUCCEEDED }
+    }
     override suspend fun cleanup(plan: ContentPlanStore.Plan, state: State) {
         if (state == State.CANCELLED) queue.store.children(plan.id).forEach { queue.ticket(it.id)?.cancel() }
     }

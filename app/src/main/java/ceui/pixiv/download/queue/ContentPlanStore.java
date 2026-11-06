@@ -56,6 +56,12 @@ public final class ContentPlanStore {
         return state == State.RUNNING || state == State.PAUSE_REQUESTED || state == State.YIELD_REQUESTED || state == State.CANCEL_REQUESTED || state == State.COMMITTED;
     }
     public Plan get(String id) { return read(owner.getReadableDatabase(), id); }
+    public boolean reconcileCancelled(String id, String checkpoint, boolean committed, String error) {
+        ContentValues value = new ContentValues(); value.put("state", committed ? "SUCCEEDED" : "FAILED");
+        if (committed) value.putNull("error"); else value.put("error", error);
+        return owner.getWritableDatabase().update("plans", value,
+                "id=? AND checkpoint=? AND state='CANCELLED' AND attempt IS NULL", new String[]{id, checkpoint}) == 1;
+    }
     public Plan succeeded(String family, String kind) {
         try (Cursor c = owner.getReadableDatabase().rawQuery(
                 "SELECT * FROM plans WHERE family=? AND kind=? AND state='SUCCEEDED' ORDER BY seq DESC LIMIT 1", new String[]{family, kind})) {

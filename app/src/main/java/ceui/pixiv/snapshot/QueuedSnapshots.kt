@@ -73,6 +73,25 @@ class QueuedSnapshots internal constructor(private val app: Context,
             }
         }
     }
+    override suspend fun reconcile(plan: ContentPlanStore.Plan): Boolean {
+        val request = request(plan)
+        val saved = gson.fromJson(plan.checkpoint, SnapshotCheckpoint::class.java)
+        val text = saved.manifestJson ?: return false
+        if (saved.resources.isEmpty()) return false
+        return ContentResourceLeases.write("snapshot:${request.snapshotId}") {
+            phases.run(plan.id, "snapshot-reconcile", "snapshot-manifest:${request.snapshotId}", Pool.COPY) {
+                val directory = SnapshotRepository.dir(app, request.snapshotId)
+                val manifest = File(directory, if (request.automatic) AUTO_SNAPSHOT_MANIFEST else SNAPSHOT_MANIFEST)
+                if (!manifest.isFile || manifest.readText() != text || !saved.resources.all { (path, receipt) ->
+                    val file = safeResolve(directory, path)
+                    file.isFile && receipt.bytes > 0 && file.length() == receipt.bytes && ArtifactPublisher.digest(file) == receipt.sha256
+                }) false else {
+                    val bean = gson.fromJson(request.illustJson, Illust::class.java)
+                    SnapshotIndex.onSnapshotWritten(bean.id, request.snapshotId, request.automatic, request.createdAt); true
+                }
+            }
+        }
+    }
     override suspend fun cleanup(plan: ContentPlanStore.Plan, state: State) {
         if (state != State.CANCELLED) return
         val request = request(plan)

@@ -38,6 +38,20 @@ class ContentPlanQueueTest {
     }
     private fun submit(family: String = "model-target", request: String = "{\"version\":1}") =
         queue.submit(family, "model") { request }
+    @Test fun aReconciliationFailureKeepsInputsAndOffersAVisibleRetry() = scenario {
+        val cleanups = AtomicInteger()
+        queue.register(object : ContentPlanHandler {
+            override val kind = "receipt"
+            override suspend fun execute(context: ContentPlanContext) { context.checkpoint("receipt"); throw IOException("ack") }
+            override suspend fun reconcile(plan: ContentPlanStore.Plan): Boolean { throw IOException("provider permission revoked") }
+            override suspend fun cleanup(plan: ContentPlanStore.Plan, state: State) { cleanups.incrementAndGet() }
+        })
+        val ticket = queue.submit("receipt", "receipt") { "frozen" }
+        assertEquals(State.FAILED, end(ticket).state); ticket.cancel()
+        eventually { queue.store.get(ticket.id).error?.contains("校验失败") == true }
+        assertEquals(State.FAILED, queue.store.get(ticket.id).state)
+        assertEquals("receipt", queue.store.get(ticket.id).checkpoint); assertEquals(0, cleanups.get())
+    }
 
     @Test fun aGroupCanAwaitAChildAtWidthOneWithoutPermittingRecursiveGroups() = scenario {
         register { context -> context.commit {} }

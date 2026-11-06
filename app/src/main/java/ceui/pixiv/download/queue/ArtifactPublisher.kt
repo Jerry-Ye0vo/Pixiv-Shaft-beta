@@ -22,6 +22,18 @@ class ArtifactPublisher(private val phases: ContentPhaseRunner, private val outp
     fun checkpoint(context: ContentPlanContext): ArtifactCheckpoint =
         runCatching { gson.fromJson(context.checkpoint, ArtifactCheckpoint::class.java) }
             .getOrNull()?.takeIf { it.version == 1 } ?: ArtifactCheckpoint()
+    suspend fun reconcile(plan: ContentPlanStore.Plan, destination: CopyDestination,
+        recorded: suspend (Uri) -> Unit = {}): Boolean {
+        val saved = runCatching { gson.fromJson(plan.checkpoint, ArtifactCheckpoint::class.java) }.getOrNull() ?: return false
+        if (saved.version != 1) return false
+        if (saved.skipped && saved.outputCommitted) return true
+        val receipt = saved.receipt ?: return false
+        if (saved.bytes <= 0 || saved.sha256.isBlank()) return false
+        return phases.run(plan.id, "reconcile-output", "copy-receipt:$receipt", ContentQueueStore.Pool.COPY) {
+            if (!output.matches(receipt, saved.sha256, saved.bytes)) false
+            else { output.finishRecovered(receipt, destination); recorded(Uri.parse(receipt)); true }
+        }
+    }
 
     suspend fun publish(context: ContentPlanContext, source: File, destination: CopyDestination,
         recorded: suspend (Uri) -> Unit = {}): ArtifactCheckpoint = phases.run(context.plan.id, "publish",

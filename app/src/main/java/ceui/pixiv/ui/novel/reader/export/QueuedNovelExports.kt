@@ -162,6 +162,11 @@ class QueuedNovelExports internal constructor(private val app: Context,
         context.progress("novel-publish")
         publisher.publish(context, source, spec.destination) { uri -> novel?.let { record(it, uri) } }
     }
+    override suspend fun reconcile(plan: ContentPlanStore.Plan): Boolean {
+        val spec = request(plan)
+        val novel = spec.novelJson?.let { gson.fromJson(it, Novel::class.java) }
+        return publisher.reconcile(plan, spec.destination) { uri -> novel?.let { record(it, uri) } }
+    }
     override suspend fun cleanup(plan: ContentPlanStore.Plan, state: State) {
         if (state !in setOf(State.SUCCEEDED, State.CANCELLED)) return
         phases.run(plan.id, "novel-cleanup", "novel-input:${plan.id}", Pool.COPY) {
