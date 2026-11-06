@@ -55,8 +55,12 @@ internal class SnapshotAssetTransfers(
 
     suspend fun writeText(target: File, value: String) = runner.run("snapshot", "metadata",
         "snapshot-file:" + target.absolutePath, Pool.COPY) {
-        atomicWrite(target) { it.write(value.toByteArray(Charsets.UTF_8)) }
+        writeTextClaimed(target, value)
     }
+
+    /** Only for a caller that already owns COPY, including final parent manifest commit. */
+    internal suspend fun writeTextClaimed(target: File, value: String) =
+        atomicWrite(target) { it.write(value.toByteArray(Charsets.UTF_8)) }
 
     private suspend fun atomicWrite(target: File, write: suspend (FileOutputStream) -> Unit) {
         target.parentFile?.let { if (!it.isDirectory && !it.mkdirs()) throw IOException("Cannot create snapshot directory") }

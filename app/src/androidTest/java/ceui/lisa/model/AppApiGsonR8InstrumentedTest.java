@@ -57,6 +57,23 @@ import retrofit2.http.GET;
 public final class AppApiGsonR8InstrumentedTest {
 
     @Test
+    public void snapshotParentResourcesAndFrozenIdentityKeepTheirSchemaInRelease() throws Exception {
+        Object request = parseWire(ceui.pixiv.snapshot.SnapshotRequest.class,
+                "{\"version\":1,\"snapshotId\":\"12345678-1234-1234-1234-123456789abc\",\"createdAt\":12345,\"illustJson\":\"{}\",\"comments\":true,\"original\":true,\"fresh\":true,\"automatic\":false}");
+        JSONObject frozen = new JSONObject(encodeWire(request));
+        assertEquals(12345L, frozen.getLong("createdAt"));
+        assertTrue(frozen.getBoolean("original"));
+        assertEquals("12345678-1234-1234-1234-123456789abc", frozen.getString("snapshotId"));
+        Object checkpoint = parseWire(ceui.pixiv.snapshot.SnapshotCheckpoint.class,
+                "{\"version\":1,\"beanJson\":\"{}\",\"resources\":{\"images/p0.jpg\":{\"identity\":\"url:source\",\"bytes\":42,\"sha256\":\"hash\"}},\"directories\":[\"ugoira/\"],\"manifestJson\":\"frozen-manifest\"}");
+        JSONObject saved = new JSONObject(encodeWire(checkpoint));
+        assertEquals(42L, saved.getJSONObject("resources").getJSONObject("images/p0.jpg").getLong("bytes"));
+        assertEquals("hash", saved.getJSONObject("resources").getJSONObject("images/p0.jpg").getString("sha256"));
+        assertEquals("ugoira/", saved.getJSONArray("directories").getString(0));
+        assertEquals("frozen-manifest", saved.getString("manifestJson"));
+    }
+
+    @Test
     public void ugoiraParentKeepsFrozenDestinationsAndActualFormatReceiptInRelease() throws Exception {
         Object request = parseWire(ceui.pixiv.ui.bulk.UgoiraSaveRequest.class,
                 "{\"version\":1,\"illustJson\":\"{}\",\"preferVideo\":true,\"gif\":{\"storage\":\"cache\",\"segments\":[\"frozen.gif\"],\"mime\":\"image/gif\",\"policy\":\"Rename\"},\"video\":{\"storage\":\"cache\",\"segments\":[\"frozen.mp4\"],\"mime\":\"video/mp4\",\"policy\":\"Rename\"}}");
