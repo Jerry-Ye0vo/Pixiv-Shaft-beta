@@ -98,6 +98,8 @@ class UgoiraParentTest {
         val observer = launch { end(ticket) }; observer.cancelAndJoin(); release!!.complete(Unit)
         assertEquals(State.SUCCEEDED, end(ticket).state); assertEquals(1, recorded.size)
     }
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    @Config(sdk = [35])
     @Test fun malformedFrameFailsEncodingRatherThanProducingASuccessWithMissingFrames() {
         val frame = File(app.cacheDir, "broken-${UUID.randomUUID()}").apply { writeText("invalid bitmap") }
         try {
