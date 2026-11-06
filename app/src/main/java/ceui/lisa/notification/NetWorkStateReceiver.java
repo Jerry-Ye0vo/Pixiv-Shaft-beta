@@ -40,9 +40,11 @@ public class NetWorkStateReceiver extends BroadcastReceiver {
         if (action == ACTION_NONE) return;
 
         ceui.pixiv.download.model.QueuedModels.refreshEligibility();
+        ceui.pixiv.ui.bulk.QueuedUgoira.refreshEligibility();
 
         if (action == ACTION_PARK) {
             ceui.pixiv.download.model.QueuedModels.onNetworkGateClosed();
+            ceui.pixiv.ui.bulk.QueuedUgoira.onNetworkGateClosed();
             // 离开 Wi-Fi：把在跑的下载退回**等待态**（不是暂停态）—— 用户设的是「只在 Wi-Fi
             // 下下」，不是「暂停」；回到 Wi-Fi 时下面的分支会把它们自动接续。
             // 已有的「用户手动放行」随之收回：用户在 Wi-Fi 下点的继续不等于同意之后走流量，

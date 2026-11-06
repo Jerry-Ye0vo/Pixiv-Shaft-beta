@@ -247,6 +247,24 @@ class ContentPlanQueueTest {
         assertEquals(0L, runtime.store.highWaterMark())
     }
 
+    @Test fun aReplayedGroupRowCanReuseItsCommittedChildBeforeTheGroupAcknowledgement() = scenario {
+        val calls = AtomicInteger()
+        register { context -> calls.incrementAndGet(); context.commit {} }
+        val first = queue.submit("batch-row:123", "model", reuseSucceeded = true) { "original" }
+        assertEquals(State.SUCCEEDED, end(first).state)
+        val replay = queue.submit("batch-row:123", "model", reuseSucceeded = true) { error("Already fulfilled row must not re-freeze settings") }
+        assertEquals(State.SUCCEEDED, end(replay).state); assertEquals(first.id, replay.id); assertEquals(1, calls.get())
+        assertEquals(1L, queue.store.highWaterMark())
+    }
+
+    @Test fun explicitNewIntentionsStillExecuteAfterAnEarlierSuccessInTheSameFamily() = scenario {
+        val calls = AtomicInteger()
+        register { context -> calls.incrementAndGet(); context.commit {} }
+        val first = submit(); assertEquals(State.SUCCEEDED, end(first).state)
+        val next = submit(); assertEquals(State.SUCCEEDED, end(next).state)
+        assertNotEquals(first.id, next.id); assertEquals(2, calls.get())
+    }
+
     @Test fun aDurableDeleteSuccessorWaitsForAnAlreadyCommittingInstallation() = scenario {
         val committing = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()

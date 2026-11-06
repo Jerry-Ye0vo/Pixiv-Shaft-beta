@@ -198,12 +198,15 @@ object UgoiraEngine {
      * 阻塞,须在 IO 线程调用。
      */
     @JvmStatic
-    fun exportForSave(illust: Illust): UgoiraExport? {
+    @JvmOverloads
+    fun exportForSave(illust: Illust, preferVideo: Boolean = Shaft.sSettings.isUgoiraSaveAsMp4(),
+                      temporaryDirectory: File? = null): UgoiraExport? {
         val frames = peekPlayableFrames(illust) ?: return null
-        if (Shaft.sSettings.isUgoiraSaveAsMp4()) {
+        if (preferVideo) {
             exportVideo(illust, frames)?.let { return it }
         }
-        val temp = File(Shaft.getContext().cacheDir, "ugoira_save_${illust.id}.gif")
+        temporaryDirectory?.mkdirs()
+        val temp = File(temporaryDirectory ?: Shaft.getContext().cacheDir, "ugoira_save_${illust.id}.gif")
         return try {
             runBlocking {
                 ContentPhases.run("ugoira", "gif", "ugoira-gif:" + temp.absolutePath, Pool.ENCODE) {
@@ -285,10 +288,12 @@ object UgoiraEngine {
      */
     suspend fun purgeBrokenFrames(illustId: Long, dir: File) {
         invalidate(illustId)
+        UgoiraCacheAccess.maintain {
         fileLockFor(illustId).withLock {
             if (dir.deleteRecursively()) {
                 Timber.tag(UGOIRA_LOG_TAG).w("[engine] illust=%d 已删除疑似损坏的帧目录 %s", illustId, dir.name)
             }
+        }
         }
     }
 
@@ -317,6 +322,8 @@ object UgoiraEngine {
     @JvmStatic
     fun sweepStaleRifeWork(context: Context) {
         engineScope.launch {
+            try {
+            UgoiraCacheAccess.maintain {
             runCatching {
                 val rifeWork = context.cacheDir.listFiles()
                     ?.filter { it.isDirectory && it.name.startsWith(RIFE_WORK_PREFIX) }
@@ -360,6 +367,9 @@ object UgoiraEngine {
                         .i("[sweep] 清掉 %d 个残留(rife_work / frames.tmp / video.mp4.tmp),回收 %d KB", removed, freed / 1024)
                 }
             }.onFailure { Timber.tag(UGOIRA_LOG_TAG).w(it, "[sweep] 清扫残留补帧目录失败") }
+            }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) { Timber.tag(UGOIRA_LOG_TAG).w(failure, "Cache maintenance admission failed") }
         }
     }
 
@@ -421,7 +431,7 @@ object UgoiraEngine {
             return@synchronized existing
         }
         Timber.tag(UGOIRA_LOG_TAG).i("[loadPlayableFrames] illust=%d 启动新任务,await", id)
-        val d = engineScope.async { runPipeline(illust) }
+        val d = engineScope.async { UgoiraCacheAccess.read { runPipeline(illust) } }
         jobs[id] = d
         d
     }
@@ -1046,11 +1056,13 @@ private fun buildGlobalPalette(files: List<File>): ByteArray? {
     val buf = ByteArray(PALETTE_SAMPLE_PIXELS * 3)
     var w = 0
     for (p in 0 until pickCount) {
+        UgoiraOutputSession.current.get()?.context?.checkStop()
         val file = files[(p.toLong() * files.size / pickCount).toInt()]
-        val bmp: Bitmap = BitmapFactory.decodeFile(file.absolutePath) ?: continue
+        val bmp: Bitmap = BitmapFactory.decodeFile(file.absolutePath)
+            ?: throw java.io.IOException("Cannot decode ugoira palette frame: $file")
         try {
             val nPix = bmp.width * bmp.height
-            if (nPix <= 0) continue
+            if (nPix <= 0) throw java.io.IOException("Empty ugoira frame: $file")
             val row = IntArray(nPix)
             bmp.getPixels(row, 0, bmp.width, 0, 0, bmp.width, bmp.height)
             val take = minOf(perFrame, nPix)
@@ -1102,8 +1114,9 @@ internal fun encodeFramesToGif(
     out: OutputStream,
     onProgress: (Int) -> Unit = {},
 ) {
+    require(files.isNotEmpty()) { "No ugoira frames to encode" }
     val encoder = AnimatedGifEncoder()
-    encoder.start(out)
+    check(encoder.start(out)) { "Cannot start GIF encoder" }
     encoder.setRepeat(0) // 无限循环
     // 全局调色板:消掉逐帧调色板导致的帧间闪烁,同时省掉 N-1 次 NeuQuant 训练。
     // 抽样失败(帧全解不开)就退回逐帧,不影响出片。
@@ -1111,16 +1124,17 @@ internal fun encodeFramesToGif(
     val total = files.size
     val gifDelays = gifFrameDelaysMs(delaysMs, files.size)
     for ((i, f) in files.withIndex()) {
+        UgoiraOutputSession.current.get()?.context?.checkStop()
         encoder.setDelay(gifDelays[i])
         val bmp: Bitmap? = BitmapFactory.decodeFile(f.absolutePath)
         if (bmp != null) {
-            encoder.addFrame(bmp)
-            bmp.recycle()
+            try { check(encoder.addFrame(bmp)) { "Cannot encode ugoira frame: $f" } }
+            finally { bmp.recycle() }
         } else {
-            Timber.tag(UGOIRA_PIPELINE_TAG).w("[UGOIRA] decode frame failed $f")
+            throw java.io.IOException("Cannot decode ugoira frame: $f")
         }
         onProgress((i + 1) * 100 / total)
     }
-    encoder.finish()
+    check(encoder.finish()) { "Cannot finish GIF encoder" }
 }
 

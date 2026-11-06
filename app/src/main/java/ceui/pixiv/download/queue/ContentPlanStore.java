@@ -52,6 +52,12 @@ public final class ContentPlanStore {
         return state == State.RUNNING || state == State.PAUSE_REQUESTED || state == State.YIELD_REQUESTED || state == State.CANCEL_REQUESTED || state == State.COMMITTED;
     }
     public Plan get(String id) { return read(owner.getReadableDatabase(), id); }
+    public Plan succeeded(String family, String kind) {
+        try (Cursor c = owner.getReadableDatabase().rawQuery(
+                "SELECT * FROM plans WHERE family=? AND kind=? AND state='SUCCEEDED' ORDER BY seq DESC LIMIT 1", new String[]{family, kind})) {
+            return c.moveToFirst() ? new Plan(c) : null;
+        }
+    }
     /** Immutable request and mutable checkpoint are separate, so a retry can identify the same intent. */
     public Plan admit(String id, String family, String kind, String request) {
         return admit(id, family, kind, request, false);

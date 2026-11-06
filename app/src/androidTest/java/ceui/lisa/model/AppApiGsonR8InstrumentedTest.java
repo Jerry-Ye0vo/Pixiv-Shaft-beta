@@ -57,6 +57,21 @@ import retrofit2.http.GET;
 public final class AppApiGsonR8InstrumentedTest {
 
     @Test
+    public void ugoiraParentKeepsFrozenDestinationsAndActualFormatReceiptInRelease() throws Exception {
+        Object request = parseWire(ceui.pixiv.ui.bulk.UgoiraSaveRequest.class,
+                "{\"version\":1,\"illustJson\":\"{}\",\"preferVideo\":true,\"gif\":{\"storage\":\"cache\",\"segments\":[\"frozen.gif\"],\"mime\":\"image/gif\",\"policy\":\"Rename\"},\"video\":{\"storage\":\"cache\",\"segments\":[\"frozen.mp4\"],\"mime\":\"video/mp4\",\"policy\":\"Rename\"}}");
+        JSONObject frozen = new JSONObject(encodeWire(request));
+        assertTrue(frozen.getBoolean("preferVideo"));
+        assertEquals("frozen.gif", frozen.getJSONObject("gif").getJSONArray("segments").getString(0));
+        assertEquals("video/mp4", frozen.getJSONObject("video").getString("mime"));
+        Object actual = parseWire(ceui.pixiv.ui.bulk.UgoiraSaveDomain.class,
+                "{\"version\":1,\"video\":false,\"metadataJson\":\"frozen-metadata\"}");
+        JSONObject receipt = new JSONObject(encodeWire(actual));
+        assertFalse(receipt.getBoolean("video"));
+        assertEquals("frozen-metadata", receipt.getString("metadataJson"));
+    }
+
+    @Test
     public void novelExportTokensAndArtifactReceiptsKeepTheirSchemaInRelease() throws Exception {
         Object request = parseWire(ceui.pixiv.ui.novel.reader.export.NovelExportRequest.class,
                 "{\"version\":1,\"format\":\"Txt\",\"novelId\":123,\"tokens\":[{\"type\":\"paragraph\",\"start\":0,\"end\":4,\"text\":\"body\",\"id\":0,\"page\":0}],\"destination\":{\"storage\":\"cache\",\"segments\":[\"book.txt\"],\"mime\":\"text/plain\",\"policy\":\"Rename\"},\"header\":\"frozen\",\"legacyTxt\":false,\"retryMode\":\"auto\"}");

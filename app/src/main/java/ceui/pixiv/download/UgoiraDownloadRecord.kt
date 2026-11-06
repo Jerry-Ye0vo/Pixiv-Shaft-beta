@@ -46,10 +46,15 @@ object UgoiraDownloadRecord {
      */
     @JvmStatic
     fun record(illust: Illust, uri: Uri, asMp4: Boolean) {
-        runCatching {
+        runCatching { recordStrict(illust, uri, asMp4,
+            DownloadsRegistry.downloads.resolvePath(DownloadItems.ugoira(illust, asMp4)).filename) }
+            .onFailure { Timber.w(it, "[UGOIRA] 下载记录写入 / 完成通知失败 illust=%d", illust.id) }
+    }
+
+    /** Queued publisher can retry history independently after provider commit; this path propagates DB failure. */
+    internal fun recordStrict(illust: Illust, uri: Uri, asMp4: Boolean, frozenName: String) {
             val entity = DownloadEntity().apply {
-                fileName = DownloadsRegistry.downloads
-                    .resolvePath(DownloadItems.ugoira(illust, asMp4)).filename
+                fileName = frozenName
                 filePath = uri.toString()
                 illustId = illust.id
                 // 动图没有分页，成品就是唯一那一「页」。留 -1 会被 DownloadPageBackfill
@@ -65,8 +70,6 @@ object UgoiraDownloadRecord {
             LocalBroadcastManager.getInstance(Shaft.getContext()).sendBroadcast(
                 Intent(Params.DOWNLOAD_FINISH).putExtra(Params.CONTENT, entity),
             )
-        }.onFailure {
-            Timber.w(it, "[UGOIRA] 下载记录写入 / 完成通知失败 illust=%d", illust.id)
-        }
     }
 }
+

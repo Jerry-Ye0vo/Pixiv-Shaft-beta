@@ -84,6 +84,7 @@ class ContentPlanQueue(
 
     /** The immutable request factory executes on IO. Identical stopped intentions can be resumed. */
     fun submit(family: String, kind: String, resumeStopped: Boolean = true, replaceActive: Boolean = false,
+               reuseSucceeded: Boolean = false,
                request: suspend () -> String): ContentPlanTicket {
         require(family.isNotBlank() && kind.isNotBlank())
         check(executing.get() == null) { "Parent workers/factories must schedule physical stages, not another parent" }
@@ -97,7 +98,7 @@ class ContentPlanQueue(
         }
         initializationFailure?.let { ticket.publish(State.FAILED, it.message); publish(ticket); return ticket }
         ticket.signal = { requestPump() }
-        commands.trySend { admit(ticket, resumeStopped, replaceActive, request) }
+        commands.trySend { admit(ticket, resumeStopped, replaceActive, reuseSucceeded, request) }
         return ticket
     }
     fun ticket(id: String): ContentPlanTicket? = tickets[id]
@@ -115,10 +116,19 @@ class ContentPlanQueue(
         synchronized(Companion) { if (singleton?.second === this) singleton = null }
     }
 
-    private suspend fun admit(reservation: ContentPlanTicket, resumeStopped: Boolean, successor: Boolean, factory: suspend () -> String) {
+    private suspend fun admit(reservation: ContentPlanTicket, resumeStopped: Boolean, successor: Boolean,
+                              reuseSucceeded: Boolean, factory: suspend () -> String) {
         try {
             reservation.checkStop()
             check(handlers.containsKey(reservation.kind)) { "No worker registered for ${reservation.kind}" }
+            val fulfilled = if (reuseSucceeded) store.succeeded(reservation.family, reservation.kind) else null
+            if (fulfilled != null) {
+                if (!tickets.containsKey(fulfilled.id)) restore(fulfilled)
+                val canonical = requireNotNull(tickets[fulfilled.id])
+                synchronized(lock) { if (families[reservation.family] === reservation) families[reservation.family] = canonical }
+                reservation.bind(canonical, scope)
+                return
+            }
             val request = withContext(executing.asContextElement("admission:" + reservation.id)) { factory() }
             // A new user intention can queue while the cancelled predecessor still closes its body.
             tickets.values.filter { it.family == reservation.family && it.stop() == ContentPlanTicket.CANCEL }

@@ -975,7 +975,7 @@ class QueueDownloadManager @Inject constructor(@ApplicationContext app: Context)
         // 是 cancel 已派出去的 worker —— 否则一条 50MB zip + ~1s 编码会跑完才理睬
         // 用户的暂停意图。worker 的 catch CancellationException 会把行翻回 PENDING，
         // resume 时主循环重新 pull。
-        cancelOngoingUgoiraWorkers()
+        stopOngoingUgoiraWorkers(false)
         Timber.tag(TAG).i("[QUEUE-CONSUMER] pause() called")
     }
     fun resume() {
@@ -1037,6 +1037,15 @@ class QueueDownloadManager @Inject constructor(@ApplicationContext app: Context)
      * PENDING 但 row 不存在，dao 静默 no-op，不会异常。
      */
     fun cancelOngoingUgoiraWorkers() {
+        stopOngoingUgoiraWorkers(true)
+    }
+
+    private fun stopOngoingUgoiraWorkers(cancel: Boolean) {
+        val queue = QueuedUgoira.get(appContext).queue
+        val rows = synchronized(ugoiraInFlightRowIds) { ugoiraInFlightRowIds.toList() }
+        rows.forEach { id -> queue.latest(QueuedUgoira.batchFamily(id))?.let { ticket ->
+            if (cancel) ticket.cancel() else ticket.pause()
+        } }
         ugoiraScope.coroutineContext.cancelChildren()
     }
 
@@ -1073,7 +1082,7 @@ class QueueDownloadManager @Inject constructor(@ApplicationContext app: Context)
                 runCatching { dao.updateStatus(row.id, QueueStatus.DOWNLOADING) }
                 queueListInvalidations.tryEmit(Unit)
                 Timber.tag(TAG).i("[QUEUE-CONSUMER] ugoira start illust=${row.illustId}")
-                downloadUgoira(bean, ugoiraEncodeSem) { phase ->
+                QueuedUgoira.get(appContext).saveBatch(row.id, bean) { phase ->
                     setUgoiraPhase(row.id, bean, phase)
                 }
                 val updated = runCatching {
@@ -1160,4 +1169,5 @@ class QueueDownloadManager @Inject constructor(@ApplicationContext app: Context)
 
     }
 }
+
 

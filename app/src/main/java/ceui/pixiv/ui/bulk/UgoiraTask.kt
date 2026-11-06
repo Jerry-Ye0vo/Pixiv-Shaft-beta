@@ -66,6 +66,12 @@ suspend fun downloadUgoira(
     illust: Illust,
     encodeSem: Semaphore = Semaphore(Int.MAX_VALUE),
     onPhase: (UgoiraPhase) -> Unit = {},
+) = QueuedUgoira.get(Shaft.getContext()).save(illust, onPhase)
+
+internal suspend fun downloadUgoiraRaw(
+    illust: Illust,
+    encodeSem: Semaphore = Semaphore(Int.MAX_VALUE),
+    onPhase: (UgoiraPhase) -> Unit = {},
 ) = withContext(Dispatchers.IO) {
     Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
     val ctx = Shaft.getContext()
@@ -81,16 +87,19 @@ suspend fun downloadUgoira(
     suspend fun encodeFromFrames(frames: UgoiraFrames) {
         // 出片格式随设置。mp4 那份多半已经在播放缓存里(用户看过),这时候只是纯拷贝;
         // 压不出来会降级成 GIF —— 所以 handle 必须按**实际产物**开,不能按设置开。
-        val export = UgoiraEngine.exportForSave(illust)
+        val export = UgoiraEngine.exportForSave(illust, UgoiraOutputSession.current.get()?.request?.preferVideo ?: Shaft.sSettings.isUgoiraSaveAsMp4(),
+            UgoiraOutputSession.current.get()?.directory)
         val asVideo = export?.isVideo == true
         try {
             encodeSem.withPermit {
+                UgoiraEngine.fileLockFor(illustId).withLock {
                 writeQueuedUgoiraOutput(illust, asVideo, if (export != null) Pool.COPY else Pool.ENCODE) { bos ->
                     if (export != null) {
                         BufferedInputStream(FileInputStream(export.file)).use { bis -> bis.copyTo(bos) }
                     } else {
                         encodeFramesToGif(frames.files, frames.delaysMs, bos)
                     }
+                }
                 }
             }
         } finally {
@@ -111,13 +120,16 @@ suspend fun downloadUgoira(
     val cached = runCatching {
         UgoiraMetadataCache.get(illustId)
     }.getOrNull()
-    val resp: GifResponse = if (cached?.ugoira_metadata != null) {
+    val resp: GifResponse = UgoiraOutputSession.current.get()?.metadata() ?: if (cached?.ugoira_metadata != null) {
         cached
     } else {
-        val fetched = Client.appApi.getGifPackage(illustId)
+        val fetched = ContentPhases.run("ugoira", "metadata", "ugoira-meta:$illustId", Pool.NETWORK) {
+            Client.appApi.getGifPackage(illustId)
+        }
         runCatching { UgoiraMetadataCache.put(illustId, fetched) }
         fetched
     }
+    UgoiraOutputSession.current.get()?.preserveMetadata(resp)
     val zipUrl = resp.ugoira_metadata?.zip_urls?.medium
         ?: throw IllegalStateException("ugoira zip url missing for illust=$illustId")
     coroutineContext.ensureActive()
@@ -174,10 +186,10 @@ suspend fun downloadUgoira(
             onPhase(UgoiraPhase.ENCODE)
             // 这条链路是「没看过的动图批量下载」:帧就是刚解压出来的原速帧(和以前出 GIF
             // 用的是同一批,不含补帧)。mp4 压到临时文件再拷,压不出来就照旧出 GIF。
-            val tempVideo = if (Shaft.sSettings.isUgoiraSaveAsMp4()) {
+            val tempVideo = if (UgoiraOutputSession.current.get()?.request?.preferVideo ?: Shaft.sSettings.isUgoiraSaveAsMp4()) {
                 val srcFrames = sortedUgoiraFrames(unzipFolder)
                 UgoiraVideoEncoder.encode(
-                    File(ctx.cacheDir, "ugoira_save_$illustId.mp4"),
+                    File(UgoiraOutputSession.current.get()?.directory ?: ctx.cacheDir, "ugoira_save_$illustId.mp4"),
                     srcFrames, ugoiraDelays(srcFrames.size, resp),
                 )
             } else {
@@ -225,7 +237,12 @@ private suspend fun writeQueuedUgoiraOutput(
     asVideo: Boolean,
     pool: Pool,
     write: suspend (OutputStream) -> Unit,
-) = ContentPhases.run("ugoira-save", "output", "ugoira-output:" + illust.id, pool,
+) {
+    UgoiraOutputSession.current.get()?.let { session ->
+        session.capture(asVideo, pool) { output -> BufferedOutputStream(output).use { write(it) } }
+        return
+    }
+    ContentPhases.run("ugoira-save", "output", "ugoira-output:" + illust.id, pool,
     Shaft.sGson.toJson(mapOf("illust" to illust.id, "video" to asVideo))) {
     val handle = DownloadsRegistry.downloads.open(DownloadItems.ugoira(illust, asVideo))
     if (handle != null) {
@@ -239,4 +256,5 @@ private suspend fun writeQueuedUgoiraOutput(
         // Never abort an already committed provider output because record enrichment failed.
         UgoiraDownloadRecord.record(illust, handle.uri, asVideo)
     }
+}
 }
