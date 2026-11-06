@@ -80,13 +80,9 @@ class Android10DownloadFactory22(
         // GIF (ugoira zip) 写到 app cache，相册不关心，跳过即可。
         if (isGif) return
         if (settled) return
+        // Commit failure must reach the queue; abandonWrite still owns cleanup until success.
+        onFinish()
         settled = true
-        try {
-            onFinish()
-        } catch (e: Exception) {
-            // 仅记录，不中断下载完成流程
-            android.util.Log.w("Android10DownloadFactory22", "finishWrite failed: ${e.message}")
-        }
     }
 
     override fun abandonWrite() {
@@ -117,3 +113,4 @@ class Android10DownloadFactory22(
      */
     fun isSkipPolicy(): Boolean = plan?.overwrite == OverwritePolicy.Skip
 }
+

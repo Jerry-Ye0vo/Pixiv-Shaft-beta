@@ -498,7 +498,10 @@ public class Manager {
                 pageQueue.admit(AppDatabase.getAppDatabase(mContext), Shaft.sGson, item);
                 PageQueueDiagnostics.event("admitted", item);
                 synchronized (this) {
-                    if (pendingPersistence.get(item.getUuid()) == ticket) persistenceFailures.remove(item.getUuid());
+                    if (pendingPersistence.get(item.getUuid()) == ticket) {
+                        persistenceFailures.remove(item.getUuid());
+                        blockedClaims.remove(item.getUuid());
+                    }
                 }
             } catch (Throwable t) {
                 synchronized (this) {
@@ -908,6 +911,7 @@ public class Manager {
         content.clear();
         pendingPersistence.clear();
         persistenceFailures.clear();
+        blockedClaims.clear();
         queueWrites.execute(() -> {
             try { pageQueue.clear(AppDatabase.getAppDatabase(mContext), Shaft.sGson); }
             catch (Throwable t) { reportPersistenceError("clear", t); }
@@ -930,6 +934,7 @@ public class Manager {
             content.remove(found);
             pendingPersistence.remove(uuid);
             persistenceFailures.remove(uuid);
+            blockedClaims.remove(uuid);
             downloadItem = found;
         }
         deletePersisted(downloadItem);
