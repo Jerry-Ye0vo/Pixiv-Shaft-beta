@@ -326,7 +326,6 @@ jobs:
   instrumentation:
     name: Critical androidTest (API 35)
     runs-on: ubuntu-24.04
-    needs: build
     timeout-minutes: 45
 
     steps:
