@@ -194,6 +194,16 @@ class ApkSharedQueueTest {
         eventually { root.listFiles()!!.any { it.name.contains(".part") && it.length() > 0 } }
         manager.shutdown()
         val before = requests.size
+        val segments = com.google.gson.JsonParser.parseString(requireNotNull(records.raw))
+            .asJsonObject.getAsJsonArray("segments")
+        val resumableOffsets = segments.mapIndexedNotNull { index, element ->
+            val chunk = element.asJsonObject
+            val start = chunk.get("start").asLong
+            val end = chunk.get("end").asLong
+            val length = File(root, "shaft-update.apk.part$index").length()
+            if (length > 0 && length < end - start + 1) start + length else null
+        }.toSet()
+        assertTrue("Fixture must retain at least one incomplete prefix", resumableOffsets.isNotEmpty())
         runtime.close(); runtime = ContentQueueRuntime(app, database); runtime.initialize()
         val restored = newManager()
         restored.restoreForTesting(); restored.awaitCommands()
@@ -203,7 +213,10 @@ class ApkSharedQueueTest {
         restored.start(release)
         assertEquals(ApkDownloadManager.Phase.COMPLETED, end(restored).phase)
         assertArrayEquals(bytes, restored.apkFile()!!.readBytes())
-        assertTrue(requests.drop(before).any { it.getHeader("Range")?.startsWith("bytes=1024-") == true })
+        assertTrue("Resume must reuse an actual retained prefix with its validator", requests.drop(before).any {
+            val offset = it.getHeader("Range")?.substringAfter("bytes=")?.substringBefore('-')?.toLongOrNull()
+            offset in resumableOffsets && it.getHeader("If-Range") == "\"apk-v1\""
+        })
     }
 
     @Test fun changedValidatorRejectsOldPartialRecordsWithoutAppendingNewBytes() = scenario {
