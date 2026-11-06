@@ -100,6 +100,13 @@ class DurableCopyQueue(
     }
 
     fun ticket(id: String): CopyTicket? = tickets[id]
+    fun resume(id: String) { commands.trySend {
+        val ticket = tickets[id] ?: return@trySend
+        if (workers.containsKey(id)) return@trySend
+        if (runtime.store.get(id)?.state !in setOf(State.PAUSED, State.FAILED)) return@trySend
+        ticket.retry()
+        if (runtime.store.resume(id)) { ticket.publish(State.QUEUED); publish(ticket); requestPump(); runtime.changed() }
+    } }
 
     fun cancel(family: String): Boolean = synchronized(lock) { families[family] }?.cancel() ?: false
 
@@ -188,6 +195,7 @@ class DurableCopyQueue(
             intent.fallbackSnapshot?.let(::snapshot)
             val ticket = CopyTicket(row.id, intent.request.family)
             ticket.intent = intent; ticket.sequence = row.sequence; ticket.signal = { requestPump() }
+            if (row.state == State.PAUSED) ticket.pause()
             tickets[row.id] = ticket
             ticket.publish(row.state, row.error)
             if (row.state == State.SUCCEEDED) {
@@ -227,6 +235,10 @@ class DurableCopyQueue(
                 continue
             }
             if (row.state != State.QUEUED) continue
+            if (ticket.isPaused()) {
+                runtime.store.pause(row.id); runtime.withdraw(row.id)
+                ticket.publish(State.PAUSED); publish(ticket); continue
+            }
             val lease = runtime.claim(row.id, Pool.COPY, capacity().coerceIn(1, 5)) ?: continue
             ticket.publish(State.RUNNING); publish(ticket)
             workers[ticket.id] = scope.launch(start = CoroutineStart.LAZY) { run(ticket, lease) }.also { it.start() }
@@ -276,7 +288,9 @@ class DurableCopyQueue(
         finally {
             withContext(NonCancellable + Dispatchers.IO) {
                 try {
-                    if (failure is CancellationException && !committed) runtime.store.cancel(lease.id)
+                    if (failure is CancellationException && !committed) {
+                        if (ticket.isPaused()) runtime.store.pause(lease.id) else runtime.store.cancel(lease.id)
+                    }
                     check(runtime.store.finish(lease.id, lease.attempt, committed, failure?.message)) { "Stale copy acknowledgement" }
                     val state = runtime.store.get(lease.id).state
                     ticket.intent = intent

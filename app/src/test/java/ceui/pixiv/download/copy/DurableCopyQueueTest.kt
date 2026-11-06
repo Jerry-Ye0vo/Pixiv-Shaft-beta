@@ -62,6 +62,34 @@ class DurableCopyQueueTest {
     private suspend fun end(ticket: CopyTicket) = ticket.status.first { it.state in setOf(State.SUCCEEDED, State.FAILED, State.CANCELLED) }
     private suspend fun eventually(test: () -> Boolean) = withTimeout(5_000) { while (!test()) delay(10) }
 
+    @Test fun aQueuedCopyCanPauseWithoutOpeningOutputAndResumeItsSameFrozenIntent() = scenario {
+        queue.ready.await()
+        val other = runtime.store.enqueue("occupied", "occupied", Pool.COPY, "x")
+        val held = runtime.store.claim(other, Pool.COPY, 1)
+        val ticket = submit()
+        eventually { runtime.store.get(ticket.id)?.state == State.QUEUED }
+        assertTrue(ticket.pause())
+        assertEquals(State.PAUSED, ticket.status.first { it.state == State.PAUSED }.state)
+        assertEquals(0, output.opens.get())
+        val frozen = runtime.store.get(ticket.id).payload
+        runtime.store.finish(other, held.attempt, true, null); runtime.changed()
+        delay(50); assertEquals(State.PAUSED, runtime.store.get(ticket.id).state)
+        assertEquals(frozen, runtime.store.get(ticket.id).payload)
+        queue.resume(ticket.id)
+        assertEquals(State.SUCCEEDED, end(ticket).state); assertEquals(1, output.opens.get())
+    }
+
+    @Test fun cancellingAPausedCopyDoesNotResumeItOrTouchTheOriginal() = scenario {
+        queue.ready.await()
+        val other = runtime.store.enqueue("occupied", "occupied", Pool.COPY, "x")
+        val held = runtime.store.claim(other, Pool.COPY, 1)
+        val ticket = submit(); eventually { runtime.store.get(ticket.id)?.state == State.QUEUED }
+        ticket.pause(); ticket.status.first { it.state == State.PAUSED }
+        assertTrue(ticket.cancel()); assertEquals(State.CANCELLED, end(ticket).state)
+        assertTrue(source.exists()); assertEquals(0, output.opens.get())
+        runtime.store.finish(other, held.attempt, true, null)
+    }
+
     @Test fun durableAdmissionPrecedesAnyOutputAndQueuedCancellationWritesNothing() = scenario {
         queue.ready.await()
         val other = runtime.store.enqueue("occupied", "occupied", Pool.COPY, "x")

@@ -486,6 +486,21 @@ class ApkDownloadManager @Inject constructor(private val app: Application) {
 
     /** 无条件从头下：删掉断点、重新探测、重新分片。 */
     fun restart(release: GitHubRelease) { command { restartQueued(release) } }
+    /** Unified-manager commands keep MMKV v2 and all existing partial-file identities. */
+    fun resume() { command { loadRecord()?.let(::parseRelease)?.let { startQueued(it) } } }
+    fun pause() { command {
+        if (_state.value.phase !in setOf(Phase.RUNNING, Phase.MERGING)) return@command
+        stopCurrent()
+        val rec = loadRecord() ?: return@command
+        rec.status = STATUS_PAUSED; saveRecord(rec)
+        publish(rec, Phase.PAUSED, downloadedOf(rec), resumable = partsExist(rec))
+    } }
+    fun cancel() { command {
+        if (_state.value.phase in setOf(Phase.IDLE, Phase.COMPLETED)) return@command
+        stopCurrent()
+        phases().run("apk-manager", "apk-cancel", "apk-directory", Pool.COPY) { deleteAllFiles(strict = true) }
+        clearRecord(); publish(null, Phase.IDLE)
+    } }
     private suspend fun restartQueued(release: GitHubRelease) {
         val asset = AppUpdateChecker.findApkAsset(release) ?: return
         stopCurrent()

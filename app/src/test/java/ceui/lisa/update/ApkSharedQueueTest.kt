@@ -108,6 +108,30 @@ class ApkSharedQueueTest {
         runtime.store.finish(task.id, task.attempt, true, null); runtime.changed()
     }
 
+    @Test fun unifiedPauseAndResumeKeepTheAcceptedVersionAndDoNotStartBeforeCapacity() = scenario {
+        val held = occupy(Pool.NETWORK)
+        manager.start(release()); manager.awaitCommands()
+        eventually { phases().any { it.state == State.QUEUED } }
+        manager.pause(); manager.awaitCommands()
+        assertEquals(ApkDownloadManager.Phase.PAUSED, manager.state.value.phase)
+        assertNotNull(records.raw); assertEquals(0, requests.size)
+        free(held); delay(50); assertEquals(0, requests.size)
+        manager.resume(); manager.awaitCommands()
+        assertEquals(ApkDownloadManager.Phase.COMPLETED, end().phase)
+        assertArrayEquals(bytes, manager.apkFile()!!.readBytes())
+    }
+
+    @Test fun unifiedCancelRetiresOnlyThisApkAndPreservesAnotherOwnersPermit() = scenario {
+        val held = occupy(Pool.NETWORK)
+        manager.start(release()); manager.awaitCommands()
+        eventually { phases().any { it.state == State.QUEUED } }
+        manager.cancel(); manager.awaitCommands()
+        assertEquals(ApkDownloadManager.Phase.IDLE, manager.state.value.phase)
+        assertNull(records.raw); assertEquals(0, requests.size)
+        assertEquals(State.RUNNING, runtime.store.get(held.id).state)
+        free(held)
+    }
+
     @Test fun persistedParentAndSharedClaimsPrecedeEveryProbeShardAndSuccessfulMerge() = scenario {
         val held = occupy(Pool.NETWORK)
         manager.start(release()); manager.awaitCommands()

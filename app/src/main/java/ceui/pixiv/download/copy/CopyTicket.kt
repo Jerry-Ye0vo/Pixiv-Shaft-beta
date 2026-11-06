@@ -21,12 +21,21 @@ class CopyTicket internal constructor(val id: String, val family: String) {
 
     @Synchronized fun cancel(): Boolean {
         delegate?.let { return it.cancel() }
-        if (!gate.compareAndSet(OPEN, CANCELLED)) return false
+        while (true) {
+            val current = gate.get()
+            if (current == CANCELLED || current == COMMITTING) return false
+            if (gate.compareAndSet(current, CANCELLED)) break
+        }
         signal()
         return true
     }
+    @Synchronized fun pause(): Boolean {
+        delegate?.let { return it.pause() }
+        if (!gate.compareAndSet(OPEN, PAUSED)) return false
+        signal(); return true
+    }
     internal fun checkCancellation() {
-        if (gate.get() == CANCELLED) throw CancellationException("Copy cancelled before output writing")
+        if (gate.get() == CANCELLED || gate.get() == PAUSED) throw CancellationException("Copy stopped before output writing")
     }
     internal fun beginWrite() {
         if (!gate.compareAndSet(OPEN, COMMITTING)) throw CancellationException("Copy cancelled before output writing")
@@ -37,6 +46,7 @@ class CopyTicket internal constructor(val id: String, val family: String) {
     }
     @Synchronized internal fun bind(other: CopyTicket, scope: CoroutineScope) {
         if (gate.get() == CANCELLED) other.cancel()
+        if (gate.get() == PAUSED) other.pause()
         delegate = other
         mutable.value = other.status.value
         scope.launch {
@@ -47,7 +57,8 @@ class CopyTicket internal constructor(val id: String, val family: String) {
         }
     }
     internal fun isCancelled() = gate.get() == CANCELLED
-    companion object { private const val OPEN = 0; private const val CANCELLED = 1; private const val COMMITTING = 2 }
+    internal fun isPaused() = gate.get() == PAUSED
+    companion object { private const val OPEN = 0; private const val CANCELLED = 1; private const val COMMITTING = 2; private const val PAUSED = 3 }
 }
 
 data class CopyStatus(

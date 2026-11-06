@@ -20,6 +20,7 @@ import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
+import androidx.recyclerview.widget.ConcatAdapter
 import ceui.lisa.R
 import ceui.lisa.activities.Shaft
 import ceui.lisa.activities.VActivity
@@ -84,6 +85,11 @@ class ActiveListV3Fragment : Fragment() {
     @Inject lateinit var queueDownloadManager: QueueDownloadManager
 
     private val adapter = ActiveAdapterV3()
+    private val contentTasks by lazy { UnifiedContentTasks(requireContext()) }
+    private val contentAdapter = ContentTaskAdapter({ row ->
+        if (row.needsFormat) showFormatChoices(row)
+        else viewLifecycleOwner.lifecycleScope.launch { if (row.resumable) contentTasks.resume(row) else contentTasks.pause(row) }
+    }, { row -> viewLifecycleOwner.lifecycleScope.launch { contentTasks.cancel(row) } }, ::showTaskDetails)
     private var statusHeader: TextView? = null
     private val queueDao: DownloadQueueDao by lazy {
         AppDatabase.getAppDatabase(Shaft.getContext()).downloadQueueDao()
@@ -119,7 +125,7 @@ class ActiveListV3Fragment : Fragment() {
         super.onViewCreated(view, savedInstanceState)
         val list = view.findViewById<RecyclerView>(R.id.list)
         list.layoutManager = LinearLayoutManager(requireContext())
-        list.adapter = adapter
+        list.adapter = ConcatAdapter(adapter, contentAdapter)
         // RV 自身高度由父布局固定（fragment 内全屏 match_parent），跟 adapter 内容
         // 多少无关。setHasFixedSize(true) 跳过每次 notifyItem* 重测自身。
         list.setHasFixedSize(true)
@@ -182,7 +188,11 @@ class ActiveListV3Fragment : Fragment() {
         // 「正在 N · 等待 M · 暂停 K · 失败 L · 1.2 MB/s」就不会再换行。
         // pause/resume 是 Manager + QueueDownloadManager 全局动作,host 直接调,
         // 不再绕 SharedVM,本 fragment 不需要订阅。
-        view.findViewById<Button>(R.id.btn1).visibility = View.GONE
+        view.findViewById<Button>(R.id.btn1).apply {
+            visibility = View.VISIBLE
+            setText(R.string.content_task_recent)
+            setOnClickListener { showRecentTasks() }
+        }
         view.findViewById<Button>(R.id.btn2).visibility = View.GONE
         val btnClear = view.findViewById<Button>(R.id.btn4).apply {
             text = getString(R.string.dlmgr_active_action_clear)
@@ -196,6 +206,7 @@ class ActiveListV3Fragment : Fragment() {
                     // 跟 QueueListV3Fragment 一致：同步取消 ugoira workers，否则
                     // 用户清完仍有 ugoira 正在跑、跑完还往用户图库写 GIF（违反"全清"）
                     runCatching { queueDownloadManager.cancelOngoingUgoiraWorkers() }
+                    contentTasks.cancelAll()
                     viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
                         runCatching { queueDao.deleteAll() }
                     }
@@ -222,8 +233,9 @@ class ActiveListV3Fragment : Fragment() {
                     queueDownloadManager.ugoiraInFlightFlow,
                     speedBpsFlow,
                     stallSecondsFlow,
-                ) { snapshot, ugoiras, speedBps, stalledSeconds ->
-                    ActiveFrame(snapshot, ugoiras, speedBps, stalledSeconds)
+                    contentTasks.rows,
+                ) { snapshot, ugoiras, speedBps, stalledSeconds, otherTasks ->
+                    ActiveFrame(snapshot, ugoiras, speedBps, stalledSeconds, otherTasks)
                 }
                     .conflate()
                     .flowOn(Dispatchers.Default)
@@ -231,17 +243,18 @@ class ActiveListV3Fragment : Fragment() {
                         val snapshot = frame.snapshot
                         val ugoiras = frame.ugoiras
                         val speedBps = frame.speedBps
-                        val downloadingCount = snapshot.count { it.state == DownloadItem.DownloadState.DOWNLOADING }
-                        val initCount = snapshot.count { it.state == DownloadItem.DownloadState.INIT }
-                        val pausedCount = snapshot.count { it.state == DownloadItem.DownloadState.PAUSED }
-                        val failedCount = snapshot.count { it.state == DownloadItem.DownloadState.FAILED }
+                        val otherTasks = frame.otherTasks.filter { it.active }
+                        val downloadingCount = snapshot.count { it.state == DownloadItem.DownloadState.DOWNLOADING } + otherTasks.count { it.running }
+                        val initCount = snapshot.count { it.state == DownloadItem.DownloadState.INIT } + otherTasks.count { it.state == ceui.pixiv.download.queue.ContentQueueStore.State.QUEUED }
+                        val pausedCount = snapshot.count { it.state == DownloadItem.DownloadState.PAUSED } + otherTasks.count { it.state == ceui.pixiv.download.queue.ContentQueueStore.State.PAUSED }
+                        val failedCount = snapshot.count { it.state == DownloadItem.DownloadState.FAILED } + otherTasks.count { it.state == ceui.pixiv.download.queue.ContentQueueStore.State.FAILED }
                         val ugoiraCount = ugoiras.size
 
                         // 运行时不变量：DOWNLOADING 数量永远不应该超过绝对上限 5。
                         // 注意不要拿当前 maxConcurrent 比 —— 用户从 5 调到 2 后那 5 条
                         // 在传的不会立即被掐，会自然消化，期间 downloadingCount > 2
                         // 是正常现象，不能误报。
-                        if (downloadingCount > 5) {
+                        if (snapshot.count { it.state == DownloadItem.DownloadState.DOWNLOADING } > 5) {
                             Timber.tag(TAG).w(
                                 "INVARIANT: ${downloadingCount} DOWNLOADING > absolute max 5! " +
                                     snapshot.filter { it.state == DownloadItem.DownloadState.DOWNLOADING }
@@ -265,7 +278,8 @@ class ActiveListV3Fragment : Fragment() {
                         statusHeader?.text = if (parts.isEmpty()) "—" else parts.joinToString(" · ")
 
                         adapter.submit(snapshot, ugoiras, frame.stalledSeconds)
-                        val anyWork = snapshot.isNotEmpty() || ugoiras.isNotEmpty()
+                        contentAdapter.submitList(otherTasks)
+                        val anyWork = snapshot.isNotEmpty() || ugoiras.isNotEmpty() || otherTasks.isNotEmpty()
                         empty.visibility = if (anyWork) View.GONE else View.VISIBLE
                         // 没有任何活跃任务时把"清空"按钮置灰,避免用户在空列表上反复点。
                         // pause/resume 改走 toolbar menu 后不在这控制 enable 状态 —
@@ -318,6 +332,10 @@ class ActiveListV3Fragment : Fragment() {
         return (millis / 1000L).toInt().coerceAtLeast(1)
     }
 
+    private fun showTaskDetails(row: ContentTaskRow) = showContentTaskDetails(contentTasks, row)
+    private fun showFormatChoices(row: ContentTaskRow) = showContentTaskFormat(contentTasks, row)
+    private fun showRecentTasks() = showContentTaskHistory(contentTasks)
+
     private fun showClearConfirmDialog(onConfirm: () -> Unit) {
         val act = activity ?: return
         if (act.isFinishing || act.isDestroyed) return
@@ -361,6 +379,7 @@ private data class ActiveFrame(
     val ugoiras: List<UgoiraInFlight>,
     val speedBps: Long,
     val stalledSeconds: Map<String, Int>,
+    val otherTasks: List<ContentTaskRow>,
 )
 
 /** 无字节进展满这么久才算断流 —— 不足 1s 的间隙是正常抖动，不算。 */
@@ -852,3 +871,4 @@ private class ActiveAdapterV3 : ListAdapter<ActiveSnapshot, ActiveAdapterV3.VH>(
         var lastLoadedUrl: String? = null
     }
 }
+
