@@ -5,12 +5,6 @@ import ceui.pixiv.api.model.Illust
 import ceui.pixiv.download.config.DownloadItems
 import ceui.pixiv.download.model.Bucket
 import ceui.pixiv.ui.task.DownloadNovelTask
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.async
-import kotlinx.coroutines.launch
-import timber.log.Timber
 
 /**
  * 插画/漫画下载时，在作品进入 Manager 下载队列前，把作品简介（caption）导出一份 txt。
@@ -33,7 +27,6 @@ object IllustCaptionExporter {
      * 往返，不能压在主线程上。限 1 并发是为了同一作品被连点两次时不会两条写同一
      * 路径互相踩（Replace 策略下会一边删一边建）。
      */
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
 
     /**
      * 导出一次作品简介（异步、fire-and-forget）。
@@ -44,7 +37,7 @@ object IllustCaptionExporter {
     @JvmStatic
     fun export(illust: Illust?) {
         val prepared = prepare(illust, force = false) ?: return
-        scope.launch { write(prepared.first, prepared.second) }
+        submit(prepared.first, prepared.second)
     }
 
     /**
@@ -58,7 +51,7 @@ object IllustCaptionExporter {
      */
     suspend fun exportManual(illust: Illust?): Boolean {
         val prepared = prepare(illust, force = true) ?: return false
-        return scope.async { write(prepared.first, prepared.second) }.await()
+        return ceui.pixiv.download.copy.QueuedLocalOutputs.get(Shaft.getContext()).await(submit(prepared.first, prepared.second))
     }
 
     /** 返回 null 表示本次不导出；否则返回 (作品, 清洗后的简介)。 */
@@ -75,25 +68,12 @@ object IllustCaptionExporter {
         return illust to caption
     }
 
-    private fun write(illust: Illust, caption: String): Boolean {
-        return try {
-            val destination = DownloadItems.illustCaptionDestination(illust)
-            // openRaw 返回 null = Skip 策略且文件已存在，按策略跳过（不算失败）。
-            val handle = DownloadsRegistry.downloads.openRaw(Bucket.Caption, destination, "text/plain")
-                ?: return true
-            try {
-                handle.stream.use { it.write(buildContent(illust, caption).toByteArray(Charsets.UTF_8)) }
-                handle.onFinish()
-                true
-            } catch (t: Throwable) {
-                // 写一半失败要把 pending 行撤掉，否则 MediaStore 会留下 0 字节的
-                // `.pending-` 孤儿文件（同 ExportUtils.saveToDownloads 的处理）。
-                handle.onAbort()
-                throw t
-            }
-        } catch (t: Throwable) {
-            Timber.tag(TAG).w(t, "export caption failed illust=${illust.id}")
-            false
+    private fun submit(illust: Illust, caption: String): ceui.pixiv.download.queue.ContentPlanTicket {
+        val outputs = ceui.pixiv.download.copy.QueuedLocalOutputs.get(Shaft.getContext())
+        return outputs.enqueue("caption:${illust.id}") {
+            ceui.pixiv.download.copy.LocalOutputRequest(type = ceui.pixiv.download.copy.QueuedLocalOutputs.CAPTION,
+                subjectId = illust.id, content = buildContent(illust, caption), destination = outputs.freeze(Bucket.Caption,
+                    DownloadItems.illustCaptionDestination(illust), "text/plain"))
         }
     }
 
@@ -113,3 +93,4 @@ object IllustCaptionExporter {
         return sb.toString()
     }
 }
+

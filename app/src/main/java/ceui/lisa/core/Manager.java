@@ -330,6 +330,27 @@ public class Manager {
                     AppDatabase database = AppDatabase.getAppDatabase(mContext);
                     List<DownloadItem> restored = pageQueue.restore(database, Shaft.sGson);
                     if (restored.isEmpty()) return;
+                    java.util.Iterator<DownloadItem> legacySaves = restored.iterator();
+                    while (legacySaves.hasNext()) {
+                        DownloadItem item = legacySaves.next();
+                        if (!item.getIllust().isGif() || !item.isAutoSave()) continue;
+                        synchronized (this) {
+                            if (generation != restoreGeneration) return;
+                            if (restoreLiveKeys.contains(PageQueuePersistence.key(item))) continue;
+                        }
+                        try {
+                            ceui.pixiv.download.queue.ContentPlanTicket parent =
+                                    ceui.pixiv.ui.bulk.QueuedUgoira.get(mContext).importLegacy(item);
+                            synchronized (this) {
+                                if (generation != restoreGeneration) { parent.cancel(); return; }
+                            }
+                            // The durable parent owns replay before the old ZIP-only journal is retired.
+                            pageQueue.cancel(database, item);
+                            legacySaves.remove();
+                        } catch (Exception migrationFailure) {
+                            reportPersistenceError("legacy-ugoira-parent", migrationFailure);
+                        }
+                    }
                     synchronized (this) {
                         if (generation != restoreGeneration) return; // User cleared the queue.
                         restored.removeIf(item -> restoreLiveKeys.contains(PageQueuePersistence.key(item)));
@@ -1397,6 +1418,14 @@ public class Manager {
 
         DownloadTask d = DownloadTask.create(emitter -> {
             ceui.pixiv.imageloader.OriginalFileLease source = null;
+            java.io.Closeable legacyCache = null;
+            if (downloadItem.getIllust().isGif()) {
+                legacyCache = ceui.pixiv.ui.bulk.UgoiraCacheAccess.tryRead();
+                if (legacyCache == null) {
+                    emitter.onError(new IOException("动图缓存正在清理，请重试"));
+                    return;
+                }
+            }
             try {
                 // 必须在可取消的 DownloadTask Body 内等待，不能占住主线程，也不能在
                 // handles 注册前等待。staged 的本地复制会从 0 覆写，旧 partial 不会混入。
@@ -1466,6 +1495,7 @@ public class Manager {
                 }
             } finally {
                 if (source != null) source.close();
+                if (legacyCache != null) try { legacyCache.close(); } catch (IOException ignored) { }
             }
         },
         // 完成回调保持在 IO 线程（DownloadTask 在 Body 跑完后同线程交付），Gson 序列化 +
@@ -1477,6 +1507,10 @@ public class Manager {
             // Throwing here reaches DownloadTask.onError and keeps this page visible as FAILED.
             // A failed commit retains its stage for retry and must never produce a core success tombstone.
             finishPageOutput(factory, stageDir, stageKey);
+            if (downloadItem.getIllust().isGif() && downloadItem.isAutoSave()) {
+                // Compatibility for an already-live old ZIP worker; wait for intent persistence only.
+                ceui.pixiv.ui.bulk.QueuedUgoira.get(context).importLegacy(downloadItem, false);
+            }
 
             postMain(() -> {
                 int sizeBefore;
@@ -1494,8 +1528,8 @@ public class Manager {
 
             if(downloadItem.getIllust().isGif()){
                 Shaft.getMMKV().encode(Params.ILLUST_ID + "_" + downloadItem.getIllust().getId(), true);
-                postMain(() ->
-                    PixivOperate.unzipAndPlay(context, downloadItem.getIllust(), downloadItem.isAutoSave()));
+                if (!downloadItem.isAutoSave()) postMain(() ->
+                    PixivOperate.unzipAndPlay(context, downloadItem.getIllust(), false));
             }
 
             // Storage commit succeeded. Record enrichment failures do not invalidate the file;

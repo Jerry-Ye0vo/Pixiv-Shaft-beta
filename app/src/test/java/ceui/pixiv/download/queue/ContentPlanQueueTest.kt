@@ -247,6 +247,40 @@ class ContentPlanQueueTest {
         assertEquals(0L, runtime.store.highWaterMark())
     }
 
+    @Test fun pausingBeforeAdmissionPersistsTheIntentInsteadOfDiscardingItsResumeRecord() = scenario {
+        val calls = AtomicInteger(); val entered = CompletableDeferred<Unit>(); val release = CompletableDeferred<Unit>()
+        register { context -> if (context.plan.family == "pause-before-admit") calls.incrementAndGet(); context.commit {} }
+        val blocking = queue.submit("busy-factory", "model") { entered.complete(Unit); release.await(); "busy" }
+        entered.await()
+        val ticket = queue.submit("pause-before-admit", "model") { "frozen" }
+        assertTrue(ticket.pause()); release.complete(Unit)
+        assertEquals(State.PAUSED, end(ticket).state); assertEquals("frozen", queue.store.get(ticket.id).request)
+        assertEquals(0, calls.get()); queue.resume(ticket.id)
+        ticket.status.first { it.state == State.SUCCEEDED }; assertEquals(1, calls.get())
+        assertEquals(State.SUCCEEDED, end(blocking).state)
+    }
+
+    @Test fun migratedFailedAndPausedStatesDoNotStartAWorkerBeforeManualResume() = scenario {
+        val calls = AtomicInteger(); register { context -> calls.incrementAndGet(); context.commit {} }
+        val failed = queue.submit("failed-legacy", "model", resumeStopped = false, initialState = State.FAILED) { "failed" }
+        val paused = queue.submit("paused-legacy", "model", resumeStopped = false, initialState = State.PAUSED) { "paused" }
+        assertEquals(State.FAILED, end(failed).state); assertEquals(State.PAUSED, end(paused).state)
+        assertEquals(0, calls.get()); assertEquals(0L, runtime.store.highWaterMark())
+        queue.resume(failed.id); failed.status.first { it.state == State.SUCCEEDED }; assertEquals(1, calls.get())
+    }
+
+    @Test fun legacyJournalReplayKeepsTheExistingFailedPausedOrCancelledParentAndItsFrozenRequest() = scenario {
+        register { context -> context.commit {} }
+        val first = queue.submit("legacy-stable", "model", resumeStopped = false, initialState = State.FAILED) { "original" }
+        assertEquals(State.FAILED, end(first).state)
+        val replay = queue.submit("legacy-stable", "model", reusePersisted = true) { error("Cannot refreeze an existing legacy intention") }
+        assertEquals(State.FAILED, end(replay).state); assertEquals(first.id, replay.id)
+        assertTrue(first.cancel()); first.status.first { it.state == State.CANCELLED }
+        val withdrawn = queue.submit("legacy-stable", "model", reusePersisted = true) { "different" }
+        assertEquals(State.CANCELLED, end(withdrawn).state); assertEquals(first.id, withdrawn.id)
+        assertEquals(1L, queue.store.highWaterMark())
+    }
+
     @Test fun aReplayedGroupRowCanReuseItsCommittedChildBeforeTheGroupAcknowledgement() = scenario {
         val calls = AtomicInteger()
         register { context -> calls.incrementAndGet(); context.commit {} }

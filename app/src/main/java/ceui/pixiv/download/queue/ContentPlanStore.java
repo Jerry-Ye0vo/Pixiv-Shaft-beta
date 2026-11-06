@@ -58,11 +58,22 @@ public final class ContentPlanStore {
             return c.moveToFirst() ? new Plan(c) : null;
         }
     }
+    public Plan latest(String family, String kind) {
+        try (Cursor c = owner.getReadableDatabase().rawQuery(
+                "SELECT * FROM plans WHERE family=? AND kind=? ORDER BY seq DESC LIMIT 1", new String[]{family, kind})) {
+            return c.moveToFirst() ? new Plan(c) : null;
+        }
+    }
     /** Immutable request and mutable checkpoint are separate, so a retry can identify the same intent. */
     public Plan admit(String id, String family, String kind, String request) {
         return admit(id, family, kind, request, false);
     }
     public Plan admit(String id, String family, String kind, String request, boolean successor) {
+        return admit(id, family, kind, request, successor, State.QUEUED);
+    }
+    public Plan admit(String id, String family, String kind, String request, boolean successor, State initial) {
+        if (initial != State.QUEUED && initial != State.PAUSED && initial != State.FAILED)
+            throw new IllegalArgumentException("Invalid initial parent state");
         if (id == null || id.isEmpty() || family == null || family.isEmpty() || kind == null || kind.isEmpty() || request == null)
             throw new IllegalArgumentException("Missing parent identity");
         return transaction(db -> {
@@ -70,7 +81,7 @@ public final class ContentPlanStore {
                 if (c.moveToFirst()) return new Plan(c);
             }
             ContentValues v = new ContentValues(); v.put("id", id); v.put("family", family); v.put("kind", kind);
-            v.put("request", request); v.put("checkpoint", "{}"); v.put("state", State.QUEUED.name());
+            v.put("request", request); v.put("checkpoint", "{}"); v.put("state", initial.name());
             db.insertOrThrow("plans", null, v); return read(db, id);
         });
     }

@@ -31,4 +31,12 @@ class ContentResourceLeasesTest {
             catch (expected: IllegalStateException) { }
         } }
     }
+    @Test fun legacyNonblockingReadsDeferWhileClearIsWaitingAndTransferredTokensCloseOnlyOnce() = scenario {
+        val gate = ContentResourceGate(); val token = gate.acquireRead(); val entered = CompletableDeferred<Unit>()
+        val writer = launch(start = CoroutineStart.UNDISPATCHED) { gate.clear { entered.complete(Unit) } }
+        assertNull(gate.tryRead()); assertFalse(entered.isCompleted)
+        token.close(); token.close(); writer.join(); assertTrue(entered.isCompleted)
+        val next = requireNotNull(gate.tryRead()); next.close()
+        gate.clear {}
+    }
 }

@@ -14,8 +14,12 @@ internal typealias UgoiraCacheGate = ceui.pixiv.download.queue.ContentResourceGa
 object UgoiraCacheAccess {
     private val gate = UgoiraCacheGate()
     internal suspend fun <T> read(block: suspend () -> T) = gate.read(block)
-    internal suspend fun <T> maintain(block: suspend () -> T) = gate.clear {
-        ceui.pixiv.download.queue.ContentPhases.run("ugoira-cache", "maintenance", "ugoira-cache-clear",
+    @JvmStatic fun tryRead(): java.io.Closeable? = gate.tryRead()
+    internal suspend fun acquireRead(): java.io.Closeable = gate.acquireRead()
+    internal suspend fun <T> maintain(block: suspend () -> T) = maintain(
+        ceui.pixiv.download.queue.ContentPhases.runner(ceui.lisa.activities.Shaft.getContext()), block)
+    internal suspend fun <T> maintain(phases: ceui.pixiv.download.queue.ContentPhaseRunner, block: suspend () -> T) = gate.clear {
+        phases.run("ugoira-cache", "maintenance", "ugoira-cache-clear",
             ceui.pixiv.download.queue.ContentQueueStore.Pool.COPY, block = block)
     }
     @JvmStatic fun clear(context: android.content.Context) = kotlinx.coroutines.runBlocking {

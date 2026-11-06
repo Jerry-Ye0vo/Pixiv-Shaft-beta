@@ -339,19 +339,15 @@ public class IllustDownload {
         // try/catch 里,异步化后不能让这些异常变成工作线程未捕获异常 / 主线程崩溃
         check(activity, () -> BACKUP_EXECUTOR.execute(() -> {
             try {
-                File textFile = LegacyFile.textFile(activity, displayName);
-                boolean written = false;
-                try {
-                    fileWriter.doSomething(textFile);
-                    Common.showLog("downloadBackupFile displayName " + textFile.getName());
-                    written = OutPut.outPutBackupFile(activity, textFile, displayName);
-                } catch (Exception e) {
-                    // 序列化 / 写临时文件本身失败:OutPut 没机会报错,这里补一条
-                    e.printStackTrace();
-                    Common.showToast(Shaft.getContext().getString(R.string.save_backup_failed,
-                            e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
-                }
+                ceui.pixiv.download.copy.LocalOutputSubmission submission =
+                        ceui.pixiv.download.copy.QueuedLocalOutputs.backup(activity.getApplicationContext(), displayName, fileWriter::doSomething);
+                boolean written = ceui.pixiv.download.copy.QueuedLocalOutputs.awaitBlocking(
+                        activity.getApplicationContext(), submission.getTicket());
+                File textFile = submission.getShareFile();
                 if (!written) {
+                    String error = submission.getTicket().getStatus().getValue().getError();
+                    Common.showToast(Shaft.getContext().getString(R.string.save_backup_failed,
+                            error != null ? error : "请在下载队列中查看失败原因"));
                     // 没写进用户存储就不回调 targetCallback —— 否则调用方会 toast「备份成功」
                     // (真机复现:全部恢复默认后备份落到相册卷被 MediaStore 拒掉,却仍提示成功)
                     return;

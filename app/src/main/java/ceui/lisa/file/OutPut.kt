@@ -32,26 +32,22 @@ object OutPut {
     @JvmStatic
     fun outPutUgoira(context: Context, from: File, illust: Illust, asVideo: Boolean) {
         try {
-            runBlocking {
-                ContentPhases.run("ugoira-save", "legacy-output", "ugoira-output:" + illust.id, Pool.COPY) {
-                    val handle = DownloadsRegistry.downloads.open(DownloadItems.ugoira(illust, asVideo))
-                    if (handle == null) {
-                        Common.showToast(string(R.string.save_gif_exists))
-                    } else {
-                        try {
-                            BufferedInputStream(FileInputStream(from)).use { bis ->
-                                BufferedOutputStream(handle.stream).use { bos -> bis.copyTo(bos) }
-                            }
-                            handle.onFinish()
-                        } catch (error: Throwable) {
-                            try { handle.onAbort() } catch (abort: Throwable) { if (abort !== error) error.addSuppressed(abort) }
-                            throw error
-                        }
-                        UgoiraDownloadRecord.record(illust, handle.uri, asVideo)
-                        Common.showToast(string(R.string.save_gif_success))
-                    }
+            val saved = runBlocking(kotlinx.coroutines.Dispatchers.IO) {
+                val outputs = ceui.pixiv.download.copy.QueuedLocalOutputs.get(context)
+                val cache = ceui.pixiv.ui.bulk.UgoiraCacheAccess.acquireRead()
+                val ticket = outputs.enqueue("legacy-ugoira:${illust.id}:${from.absolutePath}:${from.length()}:${from.lastModified()}",
+                    from, cacheReference = cache) {
+                    val item = DownloadItems.ugoira(illust, asVideo)
+                    ceui.pixiv.download.copy.LocalOutputRequest(type = ceui.pixiv.download.copy.QueuedLocalOutputs.UGOIRA,
+                        subjectId = illust.id, contextJson = Shaft.sGson.toJson(illust), asVideo = asVideo,
+                        sourcePath = from.absolutePath, sourceBytes = from.length(), sourceModified = from.lastModified(),
+                        destination = outputs.freeze(item.bucket, DownloadsRegistry.downloads.resolvePath(item), item.mime))
                 }
+                val success = outputs.await(ticket)
+                Triple(success, if (success) outputs.receipt(ticket).skipped else false, ticket.status.value.error)
             }
+            if (saved.first) Common.showToast(string(if (saved.second) R.string.save_gif_exists else R.string.save_gif_success))
+            else Common.showToast(string(R.string.save_gif_failed, saved.third ?: "请在下载队列中查看失败原因"))
         } catch (t: Throwable) {
             Timber.e(t, "outPutUgoira failed")
             Common.showToast(string(R.string.save_gif_failed, errMsg(t)))
@@ -68,22 +64,22 @@ object OutPut {
         return writeRawPath(Bucket.Backup, DownloadItems.backupDestination(fileName), "application/json", from, R.string.save_backup_failed)
     }
 
-    private fun writeRawPath(bucket: Bucket, path: RelativePath, mime: String, from: File, failedMsgId: Int): Boolean {
-        return try {
-            // openRaw 返回 null 只有 Skip 策略下「已存在」这一种情况，对调用方来说文件确实在。
-            val handle = DownloadsRegistry.downloads.openRaw(bucket, path, mime) ?: return true
-            BufferedInputStream(FileInputStream(from)).use { bis ->
-                BufferedOutputStream(handle.stream).use { bos ->
-                    bis.copyTo(bos)
-                }
+    private fun writeRawPath(bucket: Bucket, path: RelativePath, mime: String, from: File, failedMsgId: Int): Boolean = try {
+        runBlocking(kotlinx.coroutines.Dispatchers.IO) {
+            val outputs = ceui.pixiv.download.copy.QueuedLocalOutputs.get(Shaft.getContext())
+            val cache = ceui.pixiv.ui.bulk.UgoiraCacheAccess.acquireRead()
+            val ticket = outputs.enqueue("backup-file:${from.absolutePath}:${from.length()}:${from.lastModified()}", from,
+                cacheReference = cache) {
+                ceui.pixiv.download.copy.LocalOutputRequest(type = ceui.pixiv.download.copy.QueuedLocalOutputs.BACKUP, subjectId = 0,
+                    sourcePath = from.absolutePath, sourceBytes = from.length(), sourceModified = from.lastModified(),
+                    destination = outputs.freeze(bucket, path, mime))
             }
-            handle.onFinish()
-            true
-        } catch (t: Throwable) {
-            Timber.e(t, "OutPut.writeRaw failed (bucket=$bucket path=${path.joinTo()})")
-            Common.showToast(string(failedMsgId, errMsg(t)))
-            false
+            outputs.await(ticket)
         }
+    } catch (t: Throwable) {
+        Timber.e(t, "OutPut.writeRaw failed (bucket=$bucket path=${path.joinTo()})")
+        Common.showToast(string(failedMsgId, errMsg(t)))
+        false
     }
 
     private fun string(id: Int, vararg args: Any): String =

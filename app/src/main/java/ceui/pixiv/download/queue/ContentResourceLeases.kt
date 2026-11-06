@@ -21,6 +21,29 @@ class ContentResourceGate {
         companion object Key : kotlin.coroutines.CoroutineContext.Key<Write>
     }
     private fun signal() { changed.complete(Unit); changed = CompletableDeferred() }
+    /** Legacy workers which already own a physical permit may defer, but must never wait here. */
+    fun tryRead(): java.io.Closeable? = synchronized(lock) {
+        if (writing) return@synchronized null
+        readers++
+        val closed = java.util.concurrent.atomic.AtomicBoolean()
+        java.io.Closeable { if (closed.compareAndSet(false, true)) synchronized(lock) { readers--; check(readers >= 0); signal() } }
+    }
+    /** Transferable read ownership for a legacy file handed to a process-owned queued worker. */
+    suspend fun acquireRead(): java.io.Closeable {
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            val context = currentCoroutineContext()
+            val result = synchronized(lock) {
+                if (!writing || context[Read]?.gates?.contains(this) == true || context[Write]?.gates?.contains(this) == true) {
+                    readers++
+                    val closed = java.util.concurrent.atomic.AtomicBoolean()
+                    java.io.Closeable { if (closed.compareAndSet(false, true)) synchronized(lock) { readers--; check(readers >= 0); signal() } } to null
+                } else null to changed
+            }
+            result.first?.let { return it }
+            requireNotNull(result.second).await()
+        }
+    }
     suspend fun <T> read(block: suspend () -> T): T {
         val context = currentCoroutineContext()
         if (context[Read]?.gates?.contains(this) == true || context[Write]?.gates?.contains(this) == true) return block()

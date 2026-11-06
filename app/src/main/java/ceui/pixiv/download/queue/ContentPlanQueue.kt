@@ -85,8 +85,11 @@ class ContentPlanQueue(
     /** The immutable request factory executes on IO. Identical stopped intentions can be resumed. */
     fun submit(family: String, kind: String, resumeStopped: Boolean = true, replaceActive: Boolean = false,
                reuseSucceeded: Boolean = false,
+               initialState: State = State.QUEUED,
+               reusePersisted: Boolean = false,
                request: suspend () -> String): ContentPlanTicket {
         require(family.isNotBlank() && kind.isNotBlank())
+        require(initialState in setOf(State.QUEUED, State.PAUSED, State.FAILED))
         check(executing.get() == null) { "Parent workers/factories must schedule physical stages, not another parent" }
         val ticket = synchronized(lock) {
             val existing = families[family]
@@ -94,11 +97,11 @@ class ContentPlanQueue(
                 if (!replaceActive) return existing
                 existing.cancel() // a commit may already own the gate; the durable successor still waits
             }
-            ContentPlanTicket("plan:" + UUID.randomUUID(), family, kind).also { families[family] = it }
+            ContentPlanTicket("plan:" + UUID.randomUUID(), family, kind).also { it.reset(initialState); families[family] = it }
         }
         initializationFailure?.let { ticket.publish(State.FAILED, it.message); publish(ticket); return ticket }
         ticket.signal = { requestPump() }
-        commands.trySend { admit(ticket, resumeStopped, replaceActive, reuseSucceeded, request) }
+        commands.trySend { admit(ticket, resumeStopped, replaceActive, reuseSucceeded, reusePersisted, initialState, request) }
         return ticket
     }
     fun ticket(id: String): ContentPlanTicket? = tickets[id]
@@ -117,11 +120,15 @@ class ContentPlanQueue(
     }
 
     private suspend fun admit(reservation: ContentPlanTicket, resumeStopped: Boolean, successor: Boolean,
-                              reuseSucceeded: Boolean, factory: suspend () -> String) {
+                              reuseSucceeded: Boolean, reusePersisted: Boolean, initialState: State, factory: suspend () -> String) {
         try {
-            reservation.checkStop()
+            if (reservation.stop() == ContentPlanTicket.CANCEL) throw CancellationException("Parent withdrawn before admission")
             check(handlers.containsKey(reservation.kind)) { "No worker registered for ${reservation.kind}" }
-            val fulfilled = if (reuseSucceeded) store.succeeded(reservation.family, reservation.kind) else null
+            val fulfilled = when {
+                reusePersisted -> store.latest(reservation.family, reservation.kind)
+                reuseSucceeded -> store.succeeded(reservation.family, reservation.kind)
+                else -> null
+            }
             if (fulfilled != null) {
                 if (!tickets.containsKey(fulfilled.id)) restore(fulfilled)
                 val canonical = requireNotNull(tickets[fulfilled.id])
@@ -133,18 +140,23 @@ class ContentPlanQueue(
             // A new user intention can queue while the cancelled predecessor still closes its body.
             tickets.values.filter { it.family == reservation.family && it.stop() == ContentPlanTicket.CANCEL }
                 .forEach { store.cancel(it.id) }
-            var plan = store.admit(reservation.id, reservation.family, reservation.kind, request, successor)
+            var plan = store.admit(reservation.id, reservation.family, reservation.kind, request, successor, initialState)
             if (plan.kind != reservation.kind || plan.request != request) {
                 if (plan.state !in setOf(State.PAUSED, State.FAILED)) error("A different parent intention is already active")
                 store.cancel(plan.id)
                 handlers[plan.kind]?.cleanup(plan, State.CANCELLED)
                 tickets[plan.id]?.also { it.reset(State.CANCELLED); it.publish(State.CANCELLED); publish(it) }
-                plan = store.admit(reservation.id, reservation.family, reservation.kind, request)
+                plan = store.admit(reservation.id, reservation.family, reservation.kind, request, false, initialState)
             }
             val canonical = tickets[plan.id] ?: (if (plan.id == reservation.id) reservation
                 else ContentPlanTicket(plan.id, plan.family, plan.kind).also { it.reset(plan.state) })
                 .also { tickets[plan.id] = it }
-            if (resumeStopped && plan.state in setOf(State.PAUSED, State.FAILED)) {
+            if (reservation.stop() == ContentPlanTicket.PAUSE) {
+                if (canonical !== reservation) canonical.pause()
+                store.pause(plan.id); plan = requireNotNull(store.get(plan.id))
+            }
+            if (resumeStopped && reservation.stop() != ContentPlanTicket.PAUSE &&
+                !(plan.id == reservation.id && initialState != State.QUEUED) && plan.state in setOf(State.PAUSED, State.FAILED)) {
                 if (!canonical.reopen()) { store.cancel(plan.id); throw CancellationException("Parent withdrawn before retry") }
                 check(store.resume(plan.id)); plan = requireNotNull(store.get(plan.id))
             }

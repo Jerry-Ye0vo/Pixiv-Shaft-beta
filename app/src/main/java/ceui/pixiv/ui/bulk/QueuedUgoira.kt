@@ -79,16 +79,30 @@ class QueuedUgoira internal constructor(private val app: Context,
     init { queue.register(this) }
     @JvmOverloads fun enqueue(illust: Illust, family: String = "ugoira-save:${illust.id}", once: Boolean = false): ContentPlanTicket {
         manual.add(family)
-        return queue.submit(family, kind, reuseSucceeded = once) {
+        return queue.submit(family, kind, reuseSucceeded = once) { frozen(illust) }
+    }
+    private fun frozen(illust: Illust): String {
         fun destination(video: Boolean): CopyDestination {
             val item = DownloadItems.ugoira(illust, video)
             val bucket = DownloadsRegistry.store.loadOrFallback().resolve(item.bucket)
             val path = DownloadsRegistry.downloads.resolvePath(item)
             return CopyDestination.capture(bucket.storage, path, item.mime, bucket.overwrite)
         }
-        gson.toJson(UgoiraSaveRequest(illustJson = gson.toJson(illust), preferVideo = Shaft.sSettings.isUgoiraSaveAsMp4(),
+        return gson.toJson(UgoiraSaveRequest(illustJson = gson.toJson(illust), preferVideo = Shaft.sSettings.isUgoiraSaveAsMp4(),
             gif = destination(false), video = destination(true)))
-        }
+    }
+    /** IO-only legacy handoff. Retire the old journal only after this returns a durable parent. */
+    @JvmOverloads fun importLegacy(item: ceui.lisa.core.DownloadItem, restoring: Boolean = true): ContentPlanTicket = runBlocking(Dispatchers.IO) {
+        require(item.illust.isGif() && item.isAutoSave)
+        queue.ready.await()
+        val family = "ugoira-legacy:${item.uuid}"
+        val initial = if (item.isFailed) State.FAILED else if (restoring || item.isPaused) State.PAUSED else State.QUEUED
+        if (!restoring && initial == State.QUEUED) manual.add(family)
+        val ticket = queue.submit(family, kind, resumeStopped = false,
+            initialState = initial, reusePersisted = true) { frozen(item.illust) }
+        ticket.status.first { it.state != null }
+        if (queue.store.get(ticket.id) == null) throw IOException("Legacy save parent was not persisted")
+        ticket
     }
     suspend fun save(illust: Illust, phase: (UgoiraPhase) -> Unit = {}) {
         await(enqueue(illust), phase)

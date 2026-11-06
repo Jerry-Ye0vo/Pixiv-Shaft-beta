@@ -57,6 +57,18 @@ import retrofit2.http.GET;
 public final class AppApiGsonR8InstrumentedTest {
 
     @Test
+    public void localOutputIntentKeepsItsFrozenTextSourceAndDestinationInRelease() throws Exception {
+        Object request = parseWire(ceui.pixiv.download.copy.LocalOutputRequest.class,
+                "{\"version\":1,\"type\":\"caption\",\"subjectId\":123,\"destination\":{\"storage\":\"cache\",\"segments\":[\"frozen.txt\"],\"mime\":\"text/plain\",\"policy\":\"Rename\"},\"contextJson\":\"{}\",\"content\":\"frozen text\",\"sourceBytes\":42,\"sourceModified\":12345,\"producer\":\"preparation-token\",\"asVideo\":false}");
+        JSONObject frozen = new JSONObject(encodeWire(request));
+        assertEquals("caption", frozen.getString("type"));
+        assertEquals(123L, frozen.getLong("subjectId"));
+        assertEquals("frozen text", frozen.getString("content"));
+        assertEquals("frozen.txt", frozen.getJSONObject("destination").getJSONArray("segments").getString(0));
+        assertEquals("preparation-token", frozen.getString("producer"));
+    }
+
+    @Test
     public void snapshotManagementIntentAndValidatedInputKeepTheirSchemaInRelease() throws Exception {
         Object request = parseWire(ceui.pixiv.snapshot.SnapshotOperationRequest.class,
                 "{\"version\":1,\"operation\":\"export\",\"snapshotId\":\"snapshot-123\",\"uri\":\"content://documents/output/1\",\"fileName\":\"frozen.shaftsnap\",\"manifestHash\":\"hash\"}");
