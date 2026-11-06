@@ -87,7 +87,9 @@ class OriginalTransferQueueSocketTest {
         cancelStalled(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE), false)
     }
     @Test fun lastConsumerCancellationClosesAStalledBodyAndKeepsItsResumablePrefix() = scenario {
+        // Send a valid prefix but keep the connection open while the client expects more bytes.
+        // No server-side sleep: shutdown can close its reader promptly after client cancellation.
         cancelStalled(MockResponse().setHeader("ETag", "\"original-v1\"")
-            .setBody("x".repeat(64 * 1024)).throttleBody(1024, 30, TimeUnit.SECONDS), true)
+            .setBody("x".repeat(1024)).setHeader("Content-Length", 64 * 1024), true)
     }
 }
