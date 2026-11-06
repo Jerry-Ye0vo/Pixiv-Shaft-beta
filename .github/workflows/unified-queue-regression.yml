@@ -39,6 +39,7 @@ jobs:
             --tests ceui.pixiv.download.copy.CopyCheckpointTest \
             --tests ceui.pixiv.download.copy.ImagePageSaverQueueTest \
             --tests ceui.pixiv.download.DownloadsFacadeTest \
+            --tests ceui.pixiv.imageloader.OriginalTransferQueueSocketTest \
             --tests ceui.pixiv.imageloader.OriginalTransferQueueTest \
             --tests ceui.pixiv.imageloader.ResumableOkHttpFetcherTest \
             --tests ceui.pixiv.imageloader.PageImageSourceResolverTest \

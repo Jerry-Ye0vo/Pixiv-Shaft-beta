@@ -9,6 +9,12 @@ import ceui.pixiv.cache.OriginalImageCacheManager
 import ceui.pixiv.download.StageStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -120,6 +126,11 @@ class ResumableOkHttpFetcher(
         val client = clientProvider()
 
         val call = client.newCall(request)
+        // Interruption alone need not unblock a platform socket read. Close the actual call as soon
+        // as the owning transfer is cancelled; its queue lease still waits for this worker to exit.
+        val stopping = CoroutineScope(currentCoroutineContext()).launch(Dispatchers.IO, start = CoroutineStart.UNDISPATCHED) {
+            try { awaitCancellation() } finally { call.cancel() }
+        }
         var response: Response? = null
         try {
             response = runInterruptible { call.execute() }
@@ -209,7 +220,12 @@ class ResumableOkHttpFetcher(
         } catch (ce: CancellationException) {
             call.cancel()
             throw ce
+        } catch (error: Exception) {
+            // The cancellation watcher can surface SocketException rather than CE from OkHttp.
+            currentCoroutineContext().ensureActive()
+            throw error
         } finally {
+            stopping.cancel()
             response?.close()
         }
     }
