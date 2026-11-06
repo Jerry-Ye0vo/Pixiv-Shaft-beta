@@ -57,8 +57,10 @@ class ResumableOkHttpFetcher(
         suspend fun acquire(url: String, onProgress: (Int) -> Unit, saving: Boolean = false): OriginalFileLease =
             queued.acquire(url, onProgress, saving)
 
-        override suspend fun fetch(url: String, onProgress: (Int) -> Unit): File =
+        override suspend fun fetch(url: String, onProgress: (Int) -> Unit): File = withContext(Dispatchers.IO) {
+            // The caller may be Main: cache-pin release also shares a lock with IO eviction.
             acquire(url, onProgress).use { it.file }
+        }
     }
 
     // 调用方是 ImageTaskRegistry.scope（Main.immediate）：从查缓存、读 .part / manifest 起就全在 IO 上做。
