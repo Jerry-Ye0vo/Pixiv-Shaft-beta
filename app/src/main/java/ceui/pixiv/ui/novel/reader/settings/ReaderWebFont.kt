@@ -234,6 +234,8 @@ enum class ReaderWebFont(
 
     val isSupported: Boolean get() = !variable || Build.VERSION.SDK_INT >= 26
 
+    val checksumSha256: String get() = sha256
+
     val downloadUrl: String
         get() = "https://github.com/google/fonts/raw/$GOOGLE_FONTS_COMMIT/ofl/$repoPath"
 
@@ -269,3 +271,4 @@ enum class ReaderWebFont(
         fun byId(id: String): ReaderWebFont? = entries.firstOrNull { it.id == id }
     }
 }
+

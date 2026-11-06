@@ -170,15 +170,28 @@ class QueuedLocalOutputs internal constructor(private val app: Context,
         }
     }
     companion object {
-        const val CAPTION = "caption"; const val BACKUP = "backup"; const val UGOIRA = "ugoira-existing"
+        const val CAPTION = "caption"; const val BACKUP = "backup"; const val UGOIRA = "ugoira-existing"; const val FILE = "file"; const val TEXT = "text"
         private const val CAPTURED = "local-input-captured"
-        private val TYPES = setOf(CAPTION, BACKUP, UGOIRA)
+        private val TYPES = setOf(CAPTION, BACKUP, UGOIRA, FILE, TEXT)
         private fun hash(value: String) = MessageDigest.getInstance("SHA-256").digest(value.toByteArray()).joinToString("") { "%02x".format(it) }
         @Volatile private var instance: Pair<Context, QueuedLocalOutputs>? = null
         @JvmStatic fun get(context: Context): QueuedLocalOutputs {
             val app = context.applicationContext
             return instance?.takeIf { it.first === app }?.second ?: synchronized(this) {
                 instance?.takeIf { it.first === app }?.second ?: QueuedLocalOutputs(app).also { instance = app to it }
+            }
+        }
+        @JvmStatic fun text(context: Context, bucket: Bucket, path: RelativePath, mime: String, text: String): ContentPlanTicket {
+            val outputs = get(context)
+            return outputs.enqueue("local-text:${UUID.randomUUID()}") {
+                LocalOutputRequest(type = TEXT, subjectId = 0, content = text, destination = outputs.freeze(bucket, path, mime))
+            }
+        }
+        @JvmStatic fun file(context: Context, bucket: Bucket, path: RelativePath, mime: String, file: File): ContentPlanTicket {
+            val outputs = get(context)
+            return outputs.enqueue("local-file:${UUID.randomUUID()}", source = file) {
+                LocalOutputRequest(type = FILE, subjectId = 0, sourcePath = file.absolutePath, sourceBytes = file.length(),
+                    sourceModified = file.lastModified(), destination = outputs.freeze(bucket, path, mime))
             }
         }
         @JvmStatic fun backup(context: Context, name: String, producer: Consumer<File>): LocalOutputSubmission {

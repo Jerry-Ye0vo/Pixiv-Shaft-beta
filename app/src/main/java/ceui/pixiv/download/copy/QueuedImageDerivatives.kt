@@ -100,16 +100,17 @@ class QueuedImageDerivatives internal constructor(private val app: Context,
     suspend fun filter(illust: Illust, page: Int, source: File, state: FilterState, share: Boolean): ImageDerivativeResult =
         await(enqueue(freeze(illust, page, if (share) FILTER_SHARE else FILTER_SAVE, source, state)))
     suspend fun wallpaper(illust: Illust, page: Int): ImageDerivativeResult = await(enqueue(freeze(illust, page, WALLPAPER)))
+    suspend fun shareOriginal(illust: Illust, page: Int): ImageDerivativeResult = await(enqueue(freeze(illust, page, ORIGINAL_SHARE)))
     private fun freeze(illust: Illust, page: Int, type: String, source: File? = null, state: FilterState? = null): ImageDerivativeRequest {
         val safePage = page.coerceIn(0, (illust.page_count - 1).coerceAtLeast(0))
         val url = IllustDownload.getUrl(illust, safePage,
             if (type == POSTER && illust.isGif()) Params.IMAGE_RESOLUTION_LARGE else Params.IMAGE_RESOLUTION_ORIGINAL)
             ?: throw IOException("Missing source image")
-        val share = type in setOf(FILTER_SHARE, WALLPAPER)
+        val share = type in setOf(FILTER_SHARE, WALLPAPER, ORIGINAL_SHARE)
         val shareId = UUID.randomUUID().toString()
         val config = DownloadsRegistry.store.loadOrFallback()
         fun destination(png: Boolean): CopyDestination {
-            val ext = if (type == WALLPAPER) url.substringBefore('?').substringAfterLast('.', "jpg").lowercase()
+            val ext = if (type in setOf(WALLPAPER, ORIGINAL_SHARE)) url.substringBefore('?').substringAfterLast('.', "jpg").lowercase()
                 .takeIf { it in setOf("jpg", "jpeg", "png", "webp", "gif") } ?: "jpg" else if (png) "png" else "jpg"
             val mime = if (ext == "jpg" || ext == "jpeg") "image/jpeg" else "image/$ext"
             if (share) return CopyDestination("cache", segments = listOf("images", shareId,
@@ -177,7 +178,7 @@ class QueuedImageDerivatives internal constructor(private val app: Context,
                 catch (_: Exception) { save(state.copy(avatarAttempted = true)) }
                 else save(state.copy(avatarAttempted = true))
             }
-            if (spec.type == WALLPAPER) {
+            if (spec.type in setOf(WALLPAPER, ORIGINAL_SHARE)) {
                 phases.run(context.plan.id, "wallpaper-input", "derivative:${context.plan.id}", Pool.COPY) {
                     source.copyTo(artifact, overwrite = true)
                 }
@@ -215,8 +216,8 @@ class QueuedImageDerivatives internal constructor(private val app: Context,
         }
     }
     companion object {
-        const val POSTER = "poster"; const val FILTER_SAVE = "filter-save"; const val FILTER_SHARE = "filter-share"; const val WALLPAPER = "wallpaper"
-        private val TYPES = setOf(POSTER, FILTER_SAVE, FILTER_SHARE, WALLPAPER)
+        const val POSTER = "poster"; const val FILTER_SAVE = "filter-save"; const val FILTER_SHARE = "filter-share"; const val WALLPAPER = "wallpaper"; const val ORIGINAL_SHARE = "original-share"
+        private val TYPES = setOf(POSTER, FILTER_SAVE, FILTER_SHARE, WALLPAPER, ORIGINAL_SHARE)
         private fun hash(value: String) = MessageDigest.getInstance("SHA-256").digest(value.toByteArray()).joinToString("") { "%02x".format(it) }
         @Volatile private var instance: Pair<Context, QueuedImageDerivatives>? = null
         @JvmStatic fun get(context: Context): QueuedImageDerivatives {

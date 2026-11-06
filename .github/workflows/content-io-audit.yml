@@ -16,7 +16,7 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           import re, json
-          pattern = re.compile(r'openDerived\(|openRaw\(|openOutputStream\(|FileOutputStream\(|\.outputStream\(|newCall\(|downloadFile\(')
+          pattern = re.compile(r'openDerived\(|openRaw\(|openOutputStream\(|FileOutputStream\(|\.outputStream\(|newCall\(|downloadFile\(|saveToDownloadsScopedStorage\(|saveImageToGallery\(')
           rows = []
           for p in sorted(Path('app/src/main/java').rglob('*')):
               if p.suffix not in ('.java', '.kt'): continue

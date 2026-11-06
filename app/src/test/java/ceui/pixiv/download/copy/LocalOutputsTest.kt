@@ -72,6 +72,20 @@ class LocalOutputsTest {
         runtime.initialize(); val id = runtime.store.enqueue("held", "held", Pool.COPY, "{}"); return runtime.store.claim(id, Pool.COPY, 1)!!
     }
     private fun free(lease: ContentQueueStore.Task) { runtime.store.finish(lease.id, lease.attempt, true, null); runtime.changed() }
+    @Test fun aGenericTextExportPreservesItsFrozenContentWithoutCaptionOrBackupIdentity() = scenario {
+        val request = text().copy(type = QueuedLocalOutputs.TEXT, content = "https://example/123\nhttps://example/456")
+        val ticket = outputs.enqueue("links") { request }
+        assertEquals(State.SUCCEEDED, end(ticket).state)
+        assertEquals(request.content, output.readText()); assertEquals(QueuedLocalOutputs.TEXT, recorded.single().type)
+    }
+    @Test fun aGenericImageFileExportPreservesOriginalBytesAndItsSelectedDestination() = scenario {
+        val source = File(directory, "image.png").apply { writeBytes(byteArrayOf(1, 2, 3, 4)) }
+        val request = file(source).copy(type = QueuedLocalOutputs.FILE,
+            destination = destination.copy(segments = listOf("images", "frame01.png"), mime = "image/png"))
+        val ticket = outputs.enqueue("frame", source) { request }
+        assertEquals(State.SUCCEEDED, end(ticket).state)
+        assertArrayEquals(source.readBytes(), output.readBytes()); assertEquals("frame01.png", recorded.single().destination.relativePath().filename)
+    }
     @Test fun aTextIntentIsDurableBeforeAnyProviderOrPreparationBytes() = scenario {
         val held = occupy(); val ticket = outputs.enqueue("caption") { text() }
         eventually { queue.store.get(ticket.id) != null }; assertEquals(0, opened.get()); assertFalse(output.exists())

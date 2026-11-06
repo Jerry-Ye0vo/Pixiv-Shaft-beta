@@ -52,6 +52,7 @@ internal class UnifiedContentTasks(context: Context) {
         val category = when (status.kind) {
             "novel-export", "novel-series-group" -> "小说"
             "image-derivative" -> "图片导出"
+            "reader-font" -> "阅读字体"
             "ugoira-export" -> "动图"
             "model-install" -> "模型"
             else -> when { status.kind.contains("snapshot") -> "离线快照"

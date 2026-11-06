@@ -29,9 +29,8 @@ fun Fragment.shareFirstImage(illust: Illust) {
 
     viewLifecycleOwner.lifecycleScope.launch {
         val uri = runCatching {
-            val source = PageImageSourceResolver.resolve(ctx, illust, 0, url).awaitFile(ctx)
-                ?: error("no page image source: $url")
-            withContext(Dispatchers.IO) { copyToShareCache(ctx, source, illust.id, url) }
+            val prepared = ceui.pixiv.download.copy.QueuedImageDerivatives.get(ctx).shareOriginal(illust, 0)
+            FileProvider.getUriForFile(ctx, "${ctx.packageName}.provider", File(requireNotNull(prepared.uri.path)))
         }.onFailure {
             // 页面销毁导致的取消照样往上抛，别当成失败打 error 日志。
             if (it is CancellationException) throw it
@@ -49,14 +48,3 @@ fun Fragment.shareFirstImage(illust: Illust) {
     }
 }
 
-private fun copyToShareCache(ctx: Context, source: File, illustId: Long, url: String): Uri {
-    val ext = url.substringAfterLast('/')
-        .substringAfterLast('.', "jpg")
-        .substringBefore('?')
-    val dir = File(ctx.externalCacheDir, "images").apply { mkdirs() }
-    val target = File(dir, "${illustId}_p0.$ext")
-    source.inputStream().use { input ->
-        target.outputStream().use { input.copyTo(it) }
-    }
-    return FileProvider.getUriForFile(ctx, "${ctx.packageName}.provider", target)
-}

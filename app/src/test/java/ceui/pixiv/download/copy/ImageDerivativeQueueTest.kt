@@ -120,6 +120,11 @@ class ImageDerivativeQueueTest {
         assertEquals(State.SUCCEEDED, end(ticket).state); assertEquals(0, renders.get())
         assertEquals("original pixels", output.readText())
     }
+    @Test fun firstImageSharingPreservesOriginalBytesWithoutASecondEncoding() = scenario {
+        val ticket = service.enqueue(request(QueuedImageDerivatives.ORIGINAL_SHARE))
+        assertEquals(State.SUCCEEDED, end(ticket).state)
+        assertEquals(0, renders.get()); assertEquals("original pixels", output.readText())
+    }
     @Test fun cancellingAnObserverDoesNotCancelTheDurableImageExport() = scenario {
         entered = CompletableDeferred(); release = CompletableDeferred()
         val ticket = service.enqueue(request()); entered!!.await()

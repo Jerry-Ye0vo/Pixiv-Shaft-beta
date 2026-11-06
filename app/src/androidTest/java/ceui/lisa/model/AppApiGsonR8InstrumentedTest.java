@@ -88,6 +88,15 @@ public final class AppApiGsonR8InstrumentedTest {
         assertEquals(123L, saved.getLong("sourceBytes"));
         assertEquals("image/png", saved.getString("mime"));
     }
+    @Test
+    public void readerFontIntentKeepsItsAcceptedChecksumAndOriginalFontId() throws Exception {
+        Object intent = parseWire(ceui.pixiv.ui.novel.reader.settings.ReaderFontRequest.class,
+                "{\"version\":1,\"fontId\":\"web_noto_sans_sc\",\"url\":\"https://example/font.ttf\",\"bytes\":1234,\"sha256\":\"accepted-hash\",\"delete\":false}");
+        JSONObject frozen = new JSONObject(encodeWire(intent));
+        assertEquals("web_noto_sans_sc", frozen.getString("fontId"));
+        assertEquals("accepted-hash", frozen.getString("sha256"));
+        assertEquals(1234L, frozen.getLong("bytes"));
+    }
 
     @Test
     public void snapshotManagementIntentAndValidatedInputKeepTheirSchemaInRelease() throws Exception {
