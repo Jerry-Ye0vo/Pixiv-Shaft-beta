@@ -18,6 +18,9 @@ class ContentQueueRuntime(context: Context, name: String) : java.io.Closeable {
     @Synchronized fun initialize() {
         if (!recovered) {
             store.recoverAfterProcessDeath()
+            // Physical child stages have no independent replay authority. Their durable parent
+            // rechecks artifacts and submits fresh stages; abandoned children must not become ghosts.
+            store.cancelScope(ContentPhaseRunner.PREFIX)
             recovered = true
         }
     }

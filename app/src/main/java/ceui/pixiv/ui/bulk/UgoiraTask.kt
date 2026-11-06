@@ -10,6 +10,9 @@ import ceui.pixiv.api.model.Illust
 import ceui.pixiv.download.DownloadsRegistry
 import ceui.pixiv.download.UgoiraDownloadRecord
 import ceui.pixiv.download.config.DownloadItems
+import ceui.pixiv.download.queue.ContentPhases
+import ceui.pixiv.download.queue.ContentQueueStore.Pool
+import java.io.OutputStream
 import com.blankj.utilcode.util.ZipUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
@@ -80,15 +83,9 @@ suspend fun downloadUgoira(
         // 压不出来会降级成 GIF —— 所以 handle 必须按**实际产物**开,不能按设置开。
         val export = UgoiraEngine.exportForSave(illust)
         val asVideo = export?.isVideo == true
-        val handle = DownloadsRegistry.downloads.open(DownloadItems.ugoira(illust, asVideo))
-        if (handle == null) {
-            Timber.tag(TAG).i("[UGOIRA] skip: target already exists illust=$illustId")
-            if (export?.temporary == true) runCatching { export.file.delete() }
-            return
-        }
         try {
             encodeSem.withPermit {
-                BufferedOutputStream(handle.stream).use { bos ->
+                writeQueuedUgoiraOutput(illust, asVideo, if (export != null) Pool.COPY else Pool.ENCODE) { bos ->
                     if (export != null) {
                         BufferedInputStream(FileInputStream(export.file)).use { bis -> bis.copyTo(bos) }
                     } else {
@@ -96,17 +93,10 @@ suspend fun downloadUgoira(
                     }
                 }
             }
-            handle.onFinish()
-        } catch (t: Throwable) {
-            runCatching { handle.onAbort() }
-            throw t
         } finally {
             if (export?.temporary == true) runCatching { export.file.delete() }
         }
-        // onFinish 之后的收尾必须落在 try 之外：这个 catch 会 onAbort，而 MediaStore 后端的
-        // onAbort 是 contentResolver.delete(uri) —— 已经 commit 的成品在里面抛一次就被删了。
-        UgoiraDownloadRecord.record(illust, handle.uri, asVideo)
-        Timber.tag(TAG).i("[UGOIRA] done via 播放引擎帧序列 illust=$illustId (${frames.files.size}帧, rife=${frames.interpolated}) uri=${handle.uri}")
+        Timber.tag(TAG).i("[UGOIRA] done via 播放引擎帧序列 illust=$illustId (${frames.files.size}帧, rife=${frames.interpolated})")
     }
 
     // 0) 用户在详情页看过的话,帧序列已经在盘上(补帧版优先)。直接编,省掉 meta/下载/解压/补帧。
@@ -145,7 +135,7 @@ suspend fun downloadUgoira(
         val zipFile = LegacyFile.gifZipFile(ctx, illust)
         if (!zipFile.isFile || zipFile.length() == 0L) {
             onPhase(UgoiraPhase.DOWNLOAD_ZIP)
-            downloadZipTo(zipUrl, zipFile)
+            downloadQueuedZipTo(zipUrl, zipFile)
         } else {
             Timber.tag(TAG).i("[UGOIRA] zip already cached ($zipFile)")
         }
@@ -165,7 +155,9 @@ suspend fun downloadUgoira(
             }
             onPhase(UgoiraPhase.EXTRACT)
             try {
-                ZipUtils.unzipFile(zipFile, unzipFolder)
+                ContentPhases.run("ugoira", "extract", "ugoira-extract:" + unzipFolder.absolutePath, Pool.COPY) {
+                    ZipUtils.unzipFile(zipFile, unzipFolder)
+                }
             } catch (t: Throwable) {
                 // 解压失败大概率 zip 本身坏了:删 zip 再抛,重试/下次重新下载(自愈)
                 runCatching { zipFile.delete() }
@@ -191,33 +183,18 @@ suspend fun downloadUgoira(
             } else {
                 null
             }
-            val handle = DownloadsRegistry.downloads.open(DownloadItems.ugoira(illust, tempVideo != null))
-            if (handle == null) {
-                // OverwritePolicy.Skip + 目标已存在；当作完成
-                Timber.tag(TAG).i("[UGOIRA] skip: target already exists illust=$illustId")
-                runCatching { tempVideo?.delete() }
-                return@withPermit
-            }
             try {
-                BufferedOutputStream(handle.stream).use { bos ->
+                writeQueuedUgoiraOutput(illust, tempVideo != null, if (tempVideo != null) Pool.COPY else Pool.ENCODE) { bos ->
                     if (tempVideo != null) {
                         BufferedInputStream(FileInputStream(tempVideo)).use { bis -> bis.copyTo(bos) }
                     } else {
                         encodeFramesToGif(unzipFolder, resp, bos)
                     }
                 }
-                handle.onFinish()
-            } catch (t: Throwable) {
-                // onAbort 让 backend 清掉部分写入的 .pending-NNNN 文件；不调用就会留 0 字节孤儿
-                runCatching { handle.onAbort() }
-                throw t
             } finally {
                 runCatching { tempVideo?.delete() }
             }
-            // 同 encodeFromFrames：写记录在 try 之外，别让收尾动作有机会触发 onAbort 把
-            // 已经 commit 的成品删掉。
-            UgoiraDownloadRecord.record(illust, handle.uri, tempVideo != null)
-            Timber.tag(TAG).i("[UGOIRA] done illust=$illustId uri=${handle.uri}")
+
         }
 
         // 5) 成品已落到用户目录 → cache 里的 zip / 解压帧就是死重量,趁还握着文件锁删掉。
@@ -237,3 +214,29 @@ suspend fun downloadUgoira(
 // zip 下载 / 帧编码 / OkHttp client 已提到 [UgoiraEngine].kt 的 top-level（internal），
 // 保存链路(本文件)与播放链路([UgoiraEngine])共用同一份,别再各留一份拷贝。
 private const val TAG = "UgoiraTask"
+
+
+/** Output opening and all writes belong to an admitted physical stage. Encoding into the final
+ * stream conservatively holds ENCODE through provider close/finalization, without nesting pools.
+ * Copying an existing mp4/GIF uses COPY and never takes the encoder slot.
+ */
+private suspend fun writeQueuedUgoiraOutput(
+    illust: Illust,
+    asVideo: Boolean,
+    pool: Pool,
+    write: suspend (OutputStream) -> Unit,
+) = ContentPhases.run("ugoira-save", "output", "ugoira-output:" + illust.id, pool,
+    Shaft.sGson.toJson(mapOf("illust" to illust.id, "video" to asVideo))) {
+    val handle = DownloadsRegistry.downloads.open(DownloadItems.ugoira(illust, asVideo))
+    if (handle != null) {
+        try {
+            BufferedOutputStream(handle.stream).use { write(it) }
+            handle.onFinish()
+        } catch (error: Throwable) {
+            try { handle.onAbort() } catch (abort: Throwable) { if (abort !== error) error.addSuppressed(abort) }
+            throw error
+        }
+        // Never abort an already committed provider output because record enrichment failed.
+        UgoiraDownloadRecord.record(illust, handle.uri, asVideo)
+    }
+}

@@ -12,6 +12,9 @@ import ceui.lisa.models.FramesBean
 import ceui.lisa.models.GifResponse
 import ceui.pixiv.api.model.Illust
 import ceui.pixiv.download.StageStore
+import ceui.pixiv.download.queue.ContentPhaseRunner
+import ceui.pixiv.download.queue.ContentPhases
+import ceui.pixiv.download.queue.ContentQueueStore.Pool
 import ceui.lisa.utils.AnimatedGifEncoder
 import ceui.lisa.utils.Params
 import ceui.pixiv.ui.interpolate.RifeInterpolator
@@ -24,6 +27,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -204,8 +209,12 @@ object UgoiraEngine {
         }
         val temp = File(Shaft.getContext().cacheDir, "ugoira_save_${illust.id}.gif")
         return try {
-            BufferedOutputStream(FileOutputStream(temp)).use { bos ->
-                encodeFramesToGif(frames.files, frames.delaysMs, bos)
+            runBlocking {
+                ContentPhases.run("ugoira", "gif", "ugoira-gif:" + temp.absolutePath, Pool.ENCODE) {
+                    BufferedOutputStream(FileOutputStream(temp)).use { bos ->
+                        encodeFramesToGif(frames.files, frames.delaysMs, bos)
+                    }
+                }
             }
             Timber.tag(UGOIRA_LOG_TAG).i("[save] illust=%d 由帧序列编出临时 GIF (%d帧, %d bytes)", illust.id, frames.files.size, temp.length())
             UgoiraExport(temp, isVideo = false, temporary = true)
@@ -583,7 +592,7 @@ object UgoiraEngine {
                             flow.value = UgoiraProgress(UgoiraPhase.DOWNLOAD_ZIP)
                             Timber.tag(UGOIRA_LOG_TAG).i("[pipeline] illust=%d [2/4] DOWNLOAD_ZIP 开始 -> %s", id, zipFile.name)
                             var lastQuarter = -1
-                            downloadZipTo(zipUrl, zipFile) { pct ->
+                            downloadQueuedZipTo(zipUrl, zipFile) { pct ->
                                 flow.value = UgoiraProgress(UgoiraPhase.DOWNLOAD_ZIP, pct)
                                 if (pct / 25 != lastQuarter) {
                                     lastQuarter = pct / 25
@@ -604,7 +613,9 @@ object UgoiraEngine {
                             flow.value = UgoiraProgress(UgoiraPhase.EXTRACT)
                             Timber.tag(UGOIRA_LOG_TAG).i("[pipeline] illust=%d [3/4] EXTRACT 开始 (磁盘有 %d 帧,期望 %d)", id, onDisk, expected)
                             try {
-                                ZipUtils.unzipFile(zipFile, unzipFolder)
+                                ContentPhases.run("ugoira", "extract", "ugoira-extract:" + unzipFolder.absolutePath, Pool.COPY) {
+                                    ZipUtils.unzipFile(zipFile, unzipFolder)
+                                }
                             } catch (t: Throwable) {
                                 runCatching { zipFile.delete() }
                                 throw t
@@ -647,15 +658,17 @@ object UgoiraEngine {
                                 Timber.tag(UGOIRA_LOG_TAG).i("[pipeline] illust=%d [3.5/4] INTERPOLATE 开始 (%d帧)", id, srcFrames.size)
                                 var lastQuarter = -1
                                 val pipelineJob = coroutineContext[Job]
-                                val rife = RifeInterpolator.interpolate(
-                                    ctx, unzipFolder, srcDelays,
-                                    workRoot = rifeWorkRoot,
-                                    isActive = { pipelineJob?.isActive != false },
-                                ) { pct ->
-                                    flow.value = UgoiraProgress(UgoiraPhase.INTERPOLATE, pct)
-                                    if (pct / 25 != lastQuarter) {
-                                        lastQuarter = pct / 25
-                                        Timber.tag(UGOIRA_LOG_TAG).i("[pipeline] illust=%d [3.5/4] INTERPOLATE %d%%", id, pct)
+                                val rife = ContentPhases.run("ugoira", "interpolate", "ugoira-rife:$id", Pool.ENCODE) {
+                                    RifeInterpolator.interpolate(
+                                        ctx, unzipFolder, srcDelays,
+                                        workRoot = rifeWorkRoot,
+                                        isActive = { pipelineJob?.isActive != false },
+                                    ) { pct ->
+                                        flow.value = UgoiraProgress(UgoiraPhase.INTERPOLATE, pct)
+                                        if (pct / 25 != lastQuarter) {
+                                            lastQuarter = pct / 25
+                                            Timber.tag(UGOIRA_LOG_TAG).i("[pipeline] illust=%d [3.5/4] INTERPOLATE %d%%", id, pct)
+                                        }
                                     }
                                 }
                                 if (rife != null) {
@@ -789,6 +802,22 @@ internal val ugoiraHttpClient: OkHttpClient by lazy {
         .build()
 }
 
+/** Production entry: admission and a shared NETWORK claim precede client creation and any body IO.
+ * The raw worker below remains injectable for protocol tests; it has no independent dispatch power.
+ */
+internal suspend fun downloadQueuedZipTo(
+    url: String,
+    target: File,
+    runner: ContentPhaseRunner = ContentPhases.runner(Shaft.getContext()),
+    client: () -> OkHttpClient = { ugoiraHttpClient },
+    onProgress: (Int) -> Unit = {},
+) = runner.run("ugoira", "zip", "ugoira-zip:" + target.absolutePath, Pool.NETWORK,
+    com.google.gson.Gson().toJson(mapOf("url" to url, "target" to target.absolutePath))) {
+    // Another playback/save pipeline may have finished while this request waited for capacity.
+    if (target.isFile && target.length() > 0) onProgress(100)
+    else downloadZipTo(url, target, client(), onProgress)
+}
+
 /**
  * OkHttp 直下 zip 到 [target]。pixiv 服务器要 Referer，否则 403。
  * .part + .part.meta 保留已下字节和资源校验信息，中断后用 Range / If-Range 续传。
@@ -832,7 +861,11 @@ internal suspend fun downloadZipTo(
                 }
             }
             .build()
-        val complete = client.newCall(req).execute().use { r ->
+        val call = client.newCall(req)
+        val stopping = CoroutineScope(coroutineContext).launch(Dispatchers.IO, start = CoroutineStart.UNDISPATCHED) {
+            try { awaitCancellation() } finally { call.cancel() }
+        }
+        val complete = try { call.execute().use { r ->
             coroutineContext.ensureActive()
             if (!r.isSuccessful && r.code != 416) {
                 throw IOException("zip download HTTP ${r.code} url=$url")
@@ -920,6 +953,10 @@ internal suspend fun downloadZipTo(
             }
             true
         }
+        } catch (error: Throwable) {
+            coroutineContext.ensureActive()
+            throw error
+        } finally { stopping.cancel() }
         if (complete) {
             coroutineContext.ensureActive()
             if (target.exists() && !target.delete()) throw IOException("cannot replace zip ${target.name}")
@@ -1044,6 +1081,16 @@ internal suspend fun writeFramesDir(
     srcFrames: List<File>,
     delaysMs: List<Int>,
     onProgress: (Int) -> Unit = {},
+): UgoiraFrames? = ContentPhases.run("ugoira", "frames", "ugoira-frames:" + target.absolutePath,
+    if (srcFrames.all { it.extension.equals("jpg", true) || it.extension.equals("jpeg", true) }) Pool.COPY else Pool.ENCODE) {
+    writeFramesDirClaimed(target, srcFrames, delaysMs, onProgress)
+}
+
+private suspend fun writeFramesDirClaimed(
+    target: File,
+    srcFrames: List<File>,
+    delaysMs: List<Int>,
+    onProgress: (Int) -> Unit,
 ): UgoiraFrames? {
     if (srcFrames.isEmpty() || srcFrames.size != delaysMs.size) return null
     val tmp = File(target.parentFile, target.name + FRAMES_TMP_SUFFIX)
@@ -1207,3 +1254,4 @@ internal fun encodeFramesToGif(
     }
     encoder.finish()
 }
+

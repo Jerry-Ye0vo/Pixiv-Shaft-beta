@@ -6,6 +6,9 @@ import ceui.lisa.activities.Shaft
 import ceui.pixiv.api.model.Illust
 import ceui.lisa.utils.Common
 import ceui.pixiv.download.DownloadsRegistry
+import ceui.pixiv.download.queue.ContentPhases
+import ceui.pixiv.download.queue.ContentQueueStore.Pool
+import kotlinx.coroutines.runBlocking
 import ceui.pixiv.download.UgoiraDownloadRecord
 import ceui.pixiv.download.config.DownloadItems
 import ceui.pixiv.download.model.Bucket
@@ -29,21 +32,26 @@ object OutPut {
     @JvmStatic
     fun outPutUgoira(context: Context, from: File, illust: Illust, asVideo: Boolean) {
         try {
-            val handle = DownloadsRegistry.downloads.open(DownloadItems.ugoira(illust, asVideo))
-            if (handle == null) {
-                Common.showToast(string(R.string.save_gif_exists))
-                return
-            }
-            BufferedInputStream(FileInputStream(from)).use { bis ->
-                BufferedOutputStream(handle.stream).use { bos ->
-                    bis.copyTo(bos)
+            runBlocking {
+                ContentPhases.run("ugoira-save", "legacy-output", "ugoira-output:" + illust.id, Pool.COPY) {
+                    val handle = DownloadsRegistry.downloads.open(DownloadItems.ugoira(illust, asVideo))
+                    if (handle == null) {
+                        Common.showToast(string(R.string.save_gif_exists))
+                    } else {
+                        try {
+                            BufferedInputStream(FileInputStream(from)).use { bis ->
+                                BufferedOutputStream(handle.stream).use { bos -> bis.copyTo(bos) }
+                            }
+                            handle.onFinish()
+                        } catch (error: Throwable) {
+                            try { handle.onAbort() } catch (abort: Throwable) { if (abort !== error) error.addSuppressed(abort) }
+                            throw error
+                        }
+                        UgoiraDownloadRecord.record(illust, handle.uri, asVideo)
+                        Common.showToast(string(R.string.save_gif_success))
+                    }
                 }
             }
-            handle.onFinish()
-            // 成品（GIF / mp4）才算「已完成」里的那条下载记录（issue #920）——
-            // 中间 zip 不再写库，见 [ceui.lisa.core.Manager] 完成分支。
-            UgoiraDownloadRecord.record(illust, handle.uri, asVideo)
-            Common.showToast(string(R.string.save_gif_success))
         } catch (t: Throwable) {
             Timber.e(t, "outPutUgoira failed")
             Common.showToast(string(R.string.save_gif_failed, errMsg(t)))
@@ -83,3 +91,4 @@ object OutPut {
 
     private fun errMsg(t: Throwable): String = t.message ?: t.javaClass.simpleName
 }
+
