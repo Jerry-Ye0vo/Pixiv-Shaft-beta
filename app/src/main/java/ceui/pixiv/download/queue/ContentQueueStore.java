@@ -275,6 +275,37 @@ public final class ContentQueueStore extends SQLiteOpenHelper {
         return tasks;
     }
 
+    /** Keyset scan for typed adapters, including terminal receipts when requested. */
+    public List<Task> tasksPage(String prefix, long after, long through, int limit) {
+        List<Task> tasks = new ArrayList<>();
+        try (Cursor c = getReadableDatabase().rawQuery("SELECT * FROM tasks WHERE id LIKE ? AND seq>? AND seq<=? ORDER BY seq LIMIT ?",
+                new String[]{prefix + "%", String.valueOf(after), String.valueOf(through), String.valueOf(limit)})) {
+            while (c.moveToNext()) tasks.add(new Task(c));
+        }
+        return tasks;
+    }
+
+    /** Bounded warm projection; full completed history remains queryable through tasksPage. */
+    public List<Task> recentTasks(String prefix, Pool pool, State state, int limit) {
+        List<Task> tasks = new ArrayList<>();
+        try (Cursor c = getReadableDatabase().rawQuery("SELECT * FROM tasks WHERE pool=? AND state=? AND id LIKE ? ORDER BY seq DESC LIMIT ?",
+                new String[]{pool.name(), state.name(), prefix + "%", String.valueOf(limit)})) {
+            while (c.moveToNext()) tasks.add(new Task(c));
+        }
+        return tasks;
+    }
+
+    /** Checkpoints belong to the current physical attempt; late callbacks cannot replace new input/receipts. */
+    public boolean checkpoint(String id, String attempt, String payload) {
+        if (attempt == null || payload == null) return false;
+        return transaction(db -> {
+            Task task = read(db, id);
+            if (task == null || !attempt.equals(task.attempt) || !live(task.state)) return false;
+            ContentValues v = new ContentValues(); v.put("payload", payload);
+            return db.update("tasks", v, "id=?", new String[]{id}) == 1;
+        });
+    }
+
     /** Keep a small tombstone so an interrupted legacy import cannot resurrect completed work. */
     public void compactTerminal(String id) {
         ContentValues v = new ContentValues(); v.put("payload", "");
