@@ -1,4 +1,6 @@
-# Page execution handoff
+# Page execution handoff (stage 5 history)
+
+For the current NETWORK/COPY split and shared originals, see [Shared original sources](SHARED-ORIGINALS.md).
 
 The page paths already using Manager now obtain a persisted ContentQueueStore lease before starting storage preparation or a transfer (including aria2 dispatch). PageQueueOwner is owned by the process Manager; opening the store alone never resets running workers. The existing screen API and page executors remain in use.
 

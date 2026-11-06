@@ -24,7 +24,11 @@ import java.io.IOException
  * 完成后原子提交至原图专属缓存目录。
  */
 class ResumableOkHttpFetcher(
-    private val clientProvider: () -> OkHttpClient = { (Shaft.getContext() as Shaft).okHttpClient },
+    private val clientProvider: () -> OkHttpClient = {
+        val app = Shaft.getContext() as Shaft
+        // Retain the page download client's H1.1 and interceptor policy after sharing its source.
+        ceui.lisa.core.Manager.buildDownloadOkHttpClient(app.okHttpClient, app.downloadProgress)
+    },
     private val contextProvider: () -> Context = { Shaft.getContext() },
     private val cacheDirProvider: () -> File = { OriginalImageCacheManager.getCacheDir(contextProvider()) },
     private val stagingDirProvider: () -> File = { OriginalImageCacheManager.getStagingDir(contextProvider()) },

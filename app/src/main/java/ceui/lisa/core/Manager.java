@@ -281,7 +281,7 @@ public class Manager {
         return true;
     }
 
-    static OkHttpClient buildDownloadOkHttpClient(OkHttpClient base, ProgressTracker displayProgress) {
+    public static OkHttpClient buildDownloadOkHttpClient(OkHttpClient base, ProgressTracker displayProgress) {
         OkHttpClient.Builder builder = base.newBuilder()
                 .protocols(java.util.Collections.singletonList(okhttp3.Protocol.HTTP_1_1));
         builder.networkInterceptors().remove(displayProgress.getInterceptor());
