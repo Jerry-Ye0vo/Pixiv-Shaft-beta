@@ -261,6 +261,39 @@ class ImageLoadTaskTest {
         assertTrue(task.state.value is ImageLoadState.Error)
     }
 
+
+    @Test fun `original requests cannot reuse an existing preview task for the same URL`() {
+        val url = "https://example.invalid/channel-isolation.jpg"
+        try {
+            val preview = ImageLoaderV3.obtain(url, isOriginal = false, autoStart = false)
+            val original = ImageLoaderV3.obtain(url, isOriginal = true, autoStart = false)
+            org.junit.Assert.assertNotSame(preview, original)
+            assertTrue(original.request.isOriginal)
+            assertSame(original, ImageLoaderV3.obtain(url, isOriginal = true, autoStart = false))
+        } finally { ImageTaskRegistry.remove(url) }
+    }
+
+    @Test fun `late progress from a retried attempt cannot change the new attempt`() = runTest {
+        var calls = 0
+        var oldProgress: ((Int) -> Unit)? = null
+        val second = CompletableDeferred<File>()
+        val task = ImageLoadTask(ImageRequest("https://example.invalid/retry-progress"), this,
+            object : ImageFetcher {
+                override suspend fun fetch(url: String, onProgress: (Int) -> Unit): File {
+                    calls++
+                    if (calls == 1) { oldProgress = onProgress; throw IOException("first attempt") }
+                    onProgress(10)
+                    return second.await()
+                }
+            }, elapsedRealtime = { 0L })
+        task.start(); runCurrent()
+        task.retry(); runCurrent()
+        oldProgress!!(99)
+        assertEquals(ImageLoadState.Loading(10), task.state.value)
+        second.complete(tempImageFile("new-attempt")); advanceUntilIdle()
+        assertTrue(task.state.value is ImageLoadState.Success)
+    }
+
     private fun tempImageFile(name: String): File {
         return File.createTempFile("imageloadtask-$name-", ".jpg").apply {
             writeBytes(byteArrayOf(1, 2, 3))
@@ -268,3 +301,4 @@ class ImageLoadTaskTest {
         }
     }
 }
+

@@ -19,6 +19,33 @@ object OriginalImageCacheManager {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    private val pinLock = Any()
+    private val pins = mutableMapOf<String, Int>()
+
+    /** Reserve before cache lookup/transfer; a save retains this through its entire local copy. */
+    internal fun pin(cacheDir: File, stagingDir: File, url: String): java.io.Closeable {
+        val key = keyForUrl(url)
+        val paths = listOf(cacheFileFor(cacheDir, url), StageStore.partFile(stagingDir, key),
+            StageStore.metaFile(stagingDir, key)).map { it.absolutePath }
+        synchronized(pinLock) { paths.forEach { pins[it] = (pins[it] ?: 0) + 1 } }
+        val closed = java.util.concurrent.atomic.AtomicBoolean()
+        return java.io.Closeable {
+            if (closed.compareAndSet(false, true)) {
+                synchronized(pinLock) {
+                    paths.forEach { path ->
+                        val count = (pins[path] ?: 1) - 1
+                        if (count == 0) pins.remove(path) else pins[path] = count
+                    }
+                }
+                trimDirAsync(cacheDir, currentLimitMb())
+            }
+        }
+    }
+
+    private fun deleteUnpinned(file: File): Boolean = synchronized(pinLock) {
+        if (pins.containsKey(file.absolutePath)) false else file.delete()
+    }
+
     @JvmStatic
     fun getCacheDir(context: Context): File = LegacyFile.originalImageCacheFolder(context)
 
@@ -98,7 +125,7 @@ object OriginalImageCacheManager {
         var evictedCount = 0
         for (file in sorted) {
             val length = file.length()
-            if (file.delete()) {
+            if (deleteUnpinned(file)) {
                 totalSize -= length
                 evictedCount++
             }
@@ -145,7 +172,11 @@ object OriginalImageCacheManager {
     @JvmStatic
     fun sweepOrphans(context: Context, maxAgeMs: Long = 48 * 3600 * 1000L): Int {
         val stagingDir = getStagingDir(context)
-        val swept = StageStore.sweepOrphans(stagingDir, maxAgeMs, System.currentTimeMillis())
+        val now = System.currentTimeMillis()
+        val swept = stagingDir.listFiles()?.count { file ->
+            file.isFile && (file.name.endsWith(".part") || file.name.endsWith(".meta")) &&
+                now - file.lastModified() >= maxAgeMs && deleteUnpinned(file)
+        } ?: 0
         if (swept > 0) {
             Timber.d("[OriginalCache] swept $swept orphaned staging files")
         }
@@ -175,8 +206,8 @@ object OriginalImageCacheManager {
     fun clearAll(context: Context) {
         val cacheDir = getCacheDir(context)
         val stagingDir = getStagingDir(context)
-        cacheDir.listFiles()?.forEach { runCatching { it.delete() } }
-        stagingDir.listFiles()?.forEach { runCatching { it.delete() } }
+        cacheDir.listFiles()?.forEach { runCatching { deleteUnpinned(it) } }
+        stagingDir.listFiles()?.forEach { runCatching { deleteUnpinned(it) } }
         Timber.d("[OriginalCache] clearAll finished")
     }
 
@@ -198,3 +229,4 @@ object OriginalImageCacheManager {
         return if (ext.isNotEmpty() && ext.length in 2..5) ext else "dat"
     }
 }
+

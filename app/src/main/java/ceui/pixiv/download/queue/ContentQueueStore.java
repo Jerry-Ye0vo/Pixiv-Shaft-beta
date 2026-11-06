@@ -205,6 +205,22 @@ public final class ContentQueueStore extends SQLiteOpenHelper {
         });
     }
 
+    /** Upgrade a stopped page from the old combined NETWORK stage to shared transfer + COPY.
+     * Stable identity and terminal tombstones are retained; live attempts can never be rebound.
+     */
+    public void rebindWaiting(String id, String expectedOutput, String oldResource, String resource, Pool pool) {
+        transaction(db -> {
+            Task task = read(db, id);
+            if (task == null || task.resourceKey.equals(resource)) return null;
+            if (!task.outputKey.equals(expectedOutput) || !task.resourceKey.equals(oldResource) || live(task.state)) {
+                throw new IllegalStateException("Cannot rebind owned page: " + id);
+            }
+            ContentValues v = new ContentValues(); v.put("resource_key", resource); v.put("pool", pool.name());
+            db.update("tasks", v, "id=?", new String[]{id});
+            return null;
+        });
+    }
+
     /** Record a command without releasing a running worker's permit. */
     public void updateRequest(String id, String payload, boolean paused, boolean failed) {
         transaction(db -> {

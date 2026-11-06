@@ -19,20 +19,29 @@ import okio.ByteString;
 final class PageQueueOwner implements java.io.Closeable {
     static final String PREFIX = "page:";
     final ContentQueueStore store;
-    private boolean recovered;
+    private final ceui.pixiv.download.queue.ContentQueueRuntime runtime;
     private int importEpoch;
 
-    PageQueueOwner(Context context) { store = new ContentQueueStore(context); }
-    PageQueueOwner(Context context, String name) { store = new ContentQueueStore(context, name); }
-    private synchronized void initialize() {
-        if (!recovered) { store.recoverAfterProcessDeath(); recovered = true; }
+    PageQueueOwner(Context context) { this(ceui.pixiv.download.queue.ContentQueueRuntime.get(context)); }
+    PageQueueOwner(Context context, String name) { this(new ceui.pixiv.download.queue.ContentQueueRuntime(context, name)); }
+    private PageQueueOwner(ceui.pixiv.download.queue.ContentQueueRuntime runtime) {
+        this.runtime = runtime; store = runtime.getStore();
+    }
+    private void initialize() { runtime.initialize(); }
+    private static boolean sharedImage(DownloadItem item) {
+        return !item.getIllust().isGif();
+    }
+    private static Pool pool(DownloadItem item) { return sharedImage(item) ? Pool.COPY : Pool.NETWORK; }
+    private void migratePage(DownloadItem item) {
+        if (sharedImage(item)) store.rebindWaiting(id(item), output(item),
+                "pixiv-bytes:" + ByteString.encodeUtf8(item.getUrl()).sha256().hex(), resource(item), Pool.COPY);
     }
     static String id(DownloadItem item) { return PREFIX + item.getUuid(); }
     private static String output(DownloadItem item) {
         return "page-output:" + ByteString.encodeUtf8(PageQueuePersistence.key(item)).sha256().hex();
     }
     private static String resource(DownloadItem item) {
-        return "pixiv-bytes:" + ByteString.encodeUtf8(item.getUrl()).sha256().hex();
+        return (sharedImage(item) ? "page-copy:" : "pixiv-bytes:") + ByteString.encodeUtf8(item.getUrl()).sha256().hex();
     }
     private static State initial(DownloadItem item) {
         return item.isFailed() ? State.FAILED : item.isPaused() ? State.PAUSED : State.QUEUED;
@@ -46,11 +55,13 @@ final class PageQueueOwner implements java.io.Closeable {
         // Legacy first: if the process stops between commits, restart imports this durable intent.
         // A core failure never authorizes a worker; no fallback to direct execution.
         PageQueuePersistence.admit(database, gson, item);
-        store.admit(id(item), output(item), resource(item), Pool.NETWORK, payload(gson, item), initial(item), false);
+        migratePage(item);
+        store.admit(id(item), output(item), resource(item), pool(item), payload(gson, item), initial(item), false);
     }
 
     private void importOne(DownloadDao dao, Gson gson, DownloadItem item) {
-        Task task = store.admit(id(item), output(item), resource(item), Pool.NETWORK,
+        migratePage(item);
+        Task task = store.admit(id(item), output(item), resource(item), pool(item),
                 payload(gson, item), initial(item), true);
         if (task.state == State.SUCCEEDED || task.state == State.CANCELLED) {
             dao.deleteDownloadingByIdentity(item.getName(), item.getUuid());
@@ -82,6 +93,7 @@ final class PageQueueOwner implements java.io.Closeable {
                 if (item == null || item.getIllust() == null || !id(item).equals(task.id)) {
                     throw new IllegalStateException("Unreadable core page intent: " + task.id);
                 }
+                migratePage(item);
                 applyState(item, task.state);
                 result.add(item);
             }
@@ -102,7 +114,9 @@ final class PageQueueOwner implements java.io.Closeable {
     }
 
     synchronized Task claim(DownloadItem item, int capacity) {
-        initialize(); return store.claim(id(item), Pool.NETWORK, capacity);
+        initialize();
+        Task task = store.get(id(item));
+        return task == null ? null : store.claim(id(item), task.pool, capacity);
     }
 
     synchronized void park(DownloadItem item) { initialize(); store.yieldAttempt(id(item)); }
@@ -144,6 +158,7 @@ final class PageQueueOwner implements java.io.Closeable {
             applyState(snapshot, task.state);
             database.downloadDao().updateDownloadingState(item.getName(), item.getUuid(), payload(gson, snapshot));
         }
+        runtime.changed();
         return true;
     }
 

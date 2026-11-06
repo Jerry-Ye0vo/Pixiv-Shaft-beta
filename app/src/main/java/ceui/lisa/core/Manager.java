@@ -1392,6 +1392,7 @@ public class Manager {
         }
 
         DownloadTask d = DownloadTask.create(emitter -> {
+            ceui.pixiv.imageloader.OriginalFileLease source = null;
             try {
                 // 必须在可取消的 DownloadTask Body 内等待，不能占住主线程，也不能在
                 // handles 注册前等待。staged 的本地复制会从 0 覆写，旧 partial 不会混入。
@@ -1399,9 +1400,9 @@ public class Manager {
                 Timber.tag("SharedImageDownload").d("LOOKUP illustId=%d page=%d image=%s",
                         downloadItem.getIllust().getId(), downloadItem.getIndex(),
                         dlUrl.substring(dlUrl.lastIndexOf('/') + 1));
-                if (!downloadItem.getIllust().isGif() && (staged || passSize == 0)) {
+                if (!downloadItem.getIllust().isGif()) {
                     final int[] lastLoggedPercent = {-1};
-                    cachedFile = ImageLoaderV3.awaitExistingFile(dlUrl, percent -> {
+                    source = ImageLoaderV3.acquireOriginalFile(dlUrl, percent -> {
                         reportProgress(downloadItem, percent, 0L, 0L, false, emitter);
                         int bucket = percent / 10;
                         if (bucket != lastLoggedPercent[0]) {
@@ -1411,6 +1412,7 @@ public class Manager {
                                     downloadItem.getIllust().getId(), downloadItem.getIndex(), percent);
                         }
                     });
+                    cachedFile = source.getFile();
                 }
                 if (emitter.isDisposed()) return;
                 Timber.tag("SharedImageDownload").d(
@@ -1436,7 +1438,7 @@ public class Manager {
                     // 留在同一个任务里，句柄、stage 单主锁、单独放行都还在；暂停 / 挂起取消了任务的话
                     // emitter 已 dispose，不会重连。不弹 toast、不发 DOWNLOAD_FAILED，对用户是"没发生过"。
                     boolean resumable = staged || "file".equals(targetUri.getScheme());
-                    if (emitter.isDisposed() || !resumable
+                    if (emitter.isDisposed() || !downloadItem.getIllust().isGif() || !resumable
                             || !shouldSilentlyRetryAfterReadTimeout(downloadItem, e)) {
                         throw e;
                     }
@@ -1458,6 +1460,8 @@ public class Manager {
                 if (!emitter.isDisposed()) {
                     emitter.onError(e);
                 }
+            } finally {
+                if (source != null) source.close();
             }
         },
         // 完成回调保持在 IO 线程（DownloadTask 在 Body 跑完后同线程交付），Gson 序列化 +
@@ -1798,6 +1802,11 @@ public class Manager {
                 }
             }
 
+            if (cachedFile != null) {
+                // The complete copied stage is a recoverable source even if final storage commit fails.
+                StageStore.writeManifest(metaFile, StageStore.buildManifest(dlUrl, null, null, expectedTotal));
+            }
+
             // —— commit：延迟 insert 目标行，写 stage → 目标；成功后删 stage + manifest ——
             Uri targetUri = factory.insert();
             if (targetUri == null) {
@@ -1838,6 +1847,7 @@ public class Manager {
     private void runDirectTransfer(Context context, DownloadItem downloadItem, File cachedFile,
             Uri targetUri, String dlUrl, long passSize, OkHttpClient client,
             DownloadEmitter emitter) throws Exception {
+        if (cachedFile != null) passSize = 0L;
         Response response = null;
         InputStream inputStream = null;
         OutputStream outputStream = null;

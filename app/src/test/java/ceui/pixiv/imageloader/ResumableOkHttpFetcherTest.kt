@@ -203,4 +203,38 @@ class ResumableOkHttpFetcherTest {
         assertTrue(partFile.exists())
         assertTrue(partFile.length() in 1..400)
     }
+    @Test fun `validated legacy partial is adopted with its validator and survives failed adoption`() = runTest {
+        val legacy = File.createTempFile("legacy-stage-", "dir").apply { delete(); mkdirs() }
+        val url = testUrl()
+        val key = StageStore.keyForUrl(url)
+        val oldPart = StageStore.partFile(legacy, key).apply { writeBytes(payload.copyOfRange(0, 500)) }
+        StageStore.writeManifest(StageStore.metaFile(legacy, key), StageStore.buildManifest(url, etag, null, 1000))
+        server.enqueue(MockResponse().setResponseCode(206).setHeader("Content-Range", "bytes 500-999/1000")
+            .setHeader("ETag", etag).setBody(Buffer().write(payload.copyOfRange(500,1000))))
+        try {
+            val fetcher = ResumableOkHttpFetcher(clientProvider = { client },
+                cacheDirProvider = { cacheDir }, stagingDirProvider = { stagingDir },
+                legacyStagingDirProvider = { legacy })
+            val result = fetcher.fetch(url) {}
+            val request = server.takeRequest(2, TimeUnit.SECONDS)!!
+            assertEquals("bytes=500-", request.getHeader("Range"))
+            assertEquals(etag, request.getHeader("If-Range"))
+            assertArrayEquals(payload, result.readBytes())
+            assertTrue(oldPart.exists()) // old queue can still recover if import or copy is interrupted
+        } finally { legacy.deleteRecursively() }
+    }
+
+    @Test fun `legacy stage for a different exact URL is never adopted`() {
+        val legacy = File.createTempFile("legacy-stage-", "dir").apply { delete(); mkdirs() }
+        val url = testUrl()
+        val key = StageStore.keyForUrl(url)
+        try {
+            StageStore.partFile(legacy, key).writeBytes(payload)
+            StageStore.writeManifest(StageStore.metaFile(legacy, key), StageStore.buildManifest(url + "?other", etag, null, 1000))
+            testFetcher().adoptLegacyStage(url, stagingDir, legacy)
+            assertFalse(StageStore.partFile(stagingDir, key).exists())
+        } finally { legacy.deleteRecursively() }
+    }
+
 }
+
