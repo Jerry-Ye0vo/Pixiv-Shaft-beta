@@ -76,7 +76,10 @@ object ImageTaskRegistry {
     /** 无副作用地窥探某 url 是否已有可用的下载结果(用于占位链/缓存命中判断)。 */
     @Synchronized
     fun peekFile(url: String, isOriginal: Boolean = false): File? {
+        // A completed file for the identical URL has the same bytes in either channel.
+        // Only running fetchers are channel-isolated; preserve cached-file lookup compatibility.
         val file = taskMap[registryKey(ImageRequest(url, isOriginal = isOriginal))]?.currentFile
+            ?: taskMap[registryKey(ImageRequest(url, isOriginal = !isOriginal))]?.currentFile
         if (file != null && file.exists() && file.length() > 0) {
             return file
         }

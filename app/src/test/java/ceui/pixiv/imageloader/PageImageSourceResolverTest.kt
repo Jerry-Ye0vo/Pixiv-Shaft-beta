@@ -45,6 +45,7 @@ class PageImageSourceResolverTest {
     private val illust = Illust(id = 4242L, title = "t", page_count = 2)
 
     private val tempFiles = mutableListOf<File>()
+    private val cachedUrls = mutableListOf<String>()
 
     @Before
     fun setUp() {
@@ -60,6 +61,7 @@ class PageImageSourceResolverTest {
         AppDatabase.destroyInstance()
         db.close()
         tempFiles.forEach { it.delete() }
+        cachedUrls.forEach { ImageTaskRegistry.remove(it) }
     }
 
     @Test
@@ -232,7 +234,11 @@ class PageImageSourceResolverTest {
         val taskMap = ReflectionHelpers.getField<MutableMap<String, ImageLoadTask>>(
             ImageTaskRegistry, "taskMap",
         )
-        taskMap[url] = task
+        // Register through the public API, then replace that channel's task with the fake fetch.
+        ImageTaskRegistry.obtain(ImageRequest(url), autoStart = false)
+        val key = taskMap.entries.single { it.value.request.url == url && !it.value.request.isOriginal }.key
+        taskMap[key] = task
+        cachedUrls += url
     }
 
     private fun tempImageFile(name: String): File =
@@ -241,3 +247,4 @@ class PageImageSourceResolverTest {
             tempFiles += this
         }
 }
+
