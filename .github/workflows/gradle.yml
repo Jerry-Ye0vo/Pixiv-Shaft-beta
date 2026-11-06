@@ -190,7 +190,7 @@ jobs:
           exit "$failed"
 
       - name: Upload lint reports
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: lint-reports-${{ github.run_id }}
@@ -198,7 +198,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload unit test reports
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: unit-test-reports-${{ github.run_id }}
@@ -372,7 +372,7 @@ jobs:
             ./gradlew :actionqueue:connectedDebugAndroidTest --stacktrace
 
       - name: Upload instrumented test reports
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: android-test-reports-${{ github.run_id }}
