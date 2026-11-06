@@ -39,6 +39,38 @@ class ContentPlanQueueTest {
     private fun submit(family: String = "model-target", request: String = "{\"version\":1}") =
         queue.submit(family, "model") { request }
 
+    @Test fun aGroupCanAwaitAChildAtWidthOneWithoutPermittingRecursiveGroups() = scenario {
+        register { context -> context.commit {} }
+        queue.register(object : ContentPlanHandler {
+            override val kind = "test-group"
+            override val isGroup = true
+            override suspend fun execute(context: ContentPlanContext) {
+                assertThrows(IllegalStateException::class.java) { queue.submit("recursive", kind) { "{}" } }
+                val child = submit("owned-leaf")
+                assertEquals(State.SUCCEEDED, end(child).state)
+                context.commit {}
+            }
+        })
+        val ticket = queue.submit("group", "test-group") { "{}" }
+        assertEquals(State.SUCCEEDED, end(ticket).state)
+    }
+
+    @Test fun explicitResumeCanReleaseOnlyTheSelectedPolicyBlockedQueuedParent() = scenario {
+        val allowed = mutableSetOf<String>()
+        queue.register(object : ContentPlanHandler {
+            override val kind = "policy"
+            override fun canRun(plan: ContentPlanStore.Plan) = synchronized(allowed) { plan.id in allowed }
+            override fun onUserResume(plan: ContentPlanStore.Plan) { synchronized(allowed) { allowed += plan.id } }
+            override suspend fun execute(context: ContentPlanContext) { context.commit {} }
+        })
+        val first = queue.submit("first", "policy") { "{}" }
+        val second = queue.submit("second", "policy") { "{}" }
+        eventually { queue.store.get(first.id) != null && queue.store.get(second.id) != null }
+        queue.resume(first.id)
+        assertEquals(State.SUCCEEDED, end(first).state)
+        assertEquals(State.QUEUED, queue.store.get(second.id).state)
+    }
+
     @Test fun cancellationDuringAdmissionCannotBeLostOrStartAHandlerBeforePersistence() = scenario {
         val factoryEntered = CompletableDeferred<Unit>()
         val releaseFactory = CompletableDeferred<Unit>()

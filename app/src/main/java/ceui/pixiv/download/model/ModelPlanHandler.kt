@@ -29,6 +29,7 @@ internal class ModelPlanHandler(
     private val gson = Gson()
     private val manual = ConcurrentHashMap.newKeySet<String>()
     fun allow(family: String) { manual.add(family) }
+    override fun onUserResume(plan: ContentPlanStore.Plan) { allow(plan.family) }
     fun revokeManual() { manual.clear() }
     private fun request(plan: ContentPlanStore.Plan) = gson.fromJson(plan.request, ModelRequest::class.java).also { it.validate() }
     private fun directory(plan: ContentPlanStore.Plan) = File(app.filesDir, "content_model_inputs/${ModelRequest.hash(plan.id)}")

@@ -68,6 +68,7 @@ class ContentPlanQueue(
 
     fun register(handler: ContentPlanHandler) {
         require(handler.kind.isNotBlank())
+        require(handler.kind.endsWith("-group") == handler.isGroup) { "Group kinds must declare their separate planning lane" }
         val old = handlers.putIfAbsent(handler.kind, handler)
         check(old == null || old === handler) { "Parent kind already has an owner: ${handler.kind}" }
         if (old == null) commands.trySend {
@@ -90,7 +91,10 @@ class ContentPlanQueue(
                request: suspend () -> String): ContentPlanTicket {
         require(family.isNotBlank() && kind.isNotBlank())
         require(initialState in setOf(State.QUEUED, State.PAUSED, State.FAILED))
-        check(executing.get() == null) { "Parent workers/factories must schedule physical stages, not another parent" }
+        val owner = executing.get()
+        check(owner == null || (owner.startsWith("group:") && handlers[kind]?.isGroup == false)) {
+            "Only a group coordinator may submit non-group children"
+        }
         val ticket = synchronized(lock) {
             val existing = families[family]
             if (existing != null && existing.status.value.state !in ContentPlanTicket.OBSERVABLE_END && existing.stop() != ContentPlanTicket.CANCEL) {
@@ -110,8 +114,17 @@ class ContentPlanQueue(
     fun resume(id: String) { commands.trySend {
         val ticket = tickets[id] ?: return@trySend
         if (workers.containsKey(id)) return@trySend
+        val plan = store.get(id) ?: return@trySend
+        if (plan.state == State.QUEUED) { handlers[plan.kind]?.onUserResume(plan); requestPump(); return@trySend }
         if (ticket.status.value.state !in setOf(State.PAUSED, State.FAILED) || !ticket.reopen()) return@trySend
+        handlers[plan.kind]?.onUserResume(plan)
         if (store.resume(id)) { ticket.publish(State.QUEUED); publish(ticket); requestPump() }
+    } }
+    fun finishByUser(ticket: ContentPlanTicket) { commands.trySend {
+        val plan = store.get(ticket.id) ?: return@trySend
+        check(handlers[plan.kind]?.isGroup == true) { "Only groups can finish with already fetched items" }
+        store.requestFinish(plan.id)
+        requestPump()
     } }
     suspend fun shutdown() {
         runtime.removeListener(wake)
@@ -193,6 +206,11 @@ class ContentPlanQueue(
         for (ticket in tickets.values.sortedBy { it.sequence }) {
             currentCoroutineContext().ensureActive()
             var plan = store.get(ticket.id) ?: continue
+            when (store.parentState(plan.family)) {
+                State.CANCEL_REQUESTED, State.CANCELLED -> ticket.cancel()
+                State.PAUSED, State.PAUSE_REQUESTED, State.FAILED -> ticket.pause()
+                else -> Unit
+            }
             when (ticket.stop()) {
                 ContentPlanTicket.CANCEL -> store.cancel(ticket.id)
                 ContentPlanTicket.PAUSE -> store.pause(ticket.id)
@@ -228,7 +246,7 @@ class ContentPlanQueue(
         var failure: Throwable? = null
         try {
             context.checkStop()
-            withContext(executing.asContextElement(lease.id)) { handler.execute(context) }
+            withContext(executing.asContextElement(if (handler.isGroup) "group:" + lease.id else lease.id)) { handler.execute(context) }
             check(context.outputCommitted) { "Parent worker returned without committing an output receipt" }
         } catch (error: Throwable) { failure = error }
         finally {

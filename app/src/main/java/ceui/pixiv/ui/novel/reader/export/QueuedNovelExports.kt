@@ -99,6 +99,14 @@ class QueuedNovelExports internal constructor(private val app: Context,
         if (result is ExportResult.Failure) throw IOException(result.message, result.cause)
         return result is ExportResult.Success
     }
+    /** Stable group ownership prevents re-export after a child committed before its group acknowledged it. */
+    internal fun enqueueMerged(format: ExportFormat, content: MergedNovelContent, destination: CopyDestination,
+        family: String, reuseSucceeded: Boolean): ContentPlanTicket = queue.submit(family, kind,
+            reuseSucceeded = reuseSucceeded) {
+        gson.toJson(NovelExportRequest(format = format.name, novelJson = null, novelId = 0, webJson = null,
+            tokens = null, merged = ExportMerged.capture(content, gson), destination = destination,
+            header = null, retryMode = "batch"))
+    }
     private suspend fun await(ticket: ContentPlanTicket, path: RelativePath, format: ExportFormat,
         progress: suspend (String) -> Unit = {}): ExportResult {
         val state = ticket.status.first { progress(it.phase); it.state in ContentPlanTicket.OBSERVABLE_END }

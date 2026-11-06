@@ -69,6 +69,18 @@ public final class AppApiGsonR8InstrumentedTest {
     }
 
     @Test
+    public void novelGroupCheckpointKeepsFrozenChaptersAndOutputOwnershipInRelease() {
+        String json = "{\"parts\":[{\"detail\":null,\"novels\":[\"chapter-json\"],\"listed\":true,\"pages\":1,\"next\":1,\"chapters\":[{\"title\":\"Chapter\",\"text\":\"Frozen body\",\"webJson\":null,\"txtHeader\":\"第1章 Chapter\",\"txtSubtitle\":null}],\"skipped\":0,\"output\":\"plan:child\",\"written\":true}],\"selectedFormat\":\"Epub\",\"awaitingFormat\":false,\"success\":1,\"skipped\":0,\"chapters\":1,\"complete\":true}";
+        Gson gson = new Gson();
+        ceui.pixiv.ui.novel.reader.export.NovelGroupState state = gson.fromJson(json,
+                ceui.pixiv.ui.novel.reader.export.NovelGroupState.class);
+        assertEquals("Frozen body", state.getParts().get(0).getChapters().get(0).getText());
+        assertEquals("plan:child", state.getParts().get(0).getOutput());
+        assertEquals("Epub", state.getSelectedFormat());
+        assertTrue(gson.toJson(state).contains("\"txtHeader\""));
+    }
+
+    @Test
     public void snapshotManagementIntentAndValidatedInputKeepTheirSchemaInRelease() throws Exception {
         Object request = parseWire(ceui.pixiv.snapshot.SnapshotOperationRequest.class,
                 "{\"version\":1,\"operation\":\"export\",\"snapshotId\":\"snapshot-123\",\"uri\":\"content://documents/output/1\",\"fileName\":\"frozen.shaftsnap\",\"manifestHash\":\"hash\"}");

@@ -39,7 +39,7 @@ class ContentPlanStoreTest {
             db.version = 1
         }
         val (db, parents) = open()
-        assertEquals(2, db.readableDatabase.version)
+        assertEquals(3, db.readableDatabase.version)
         expected.forEachIndexed { i, state ->
             val row = db.get("page:$i")
             assertEquals(state, row.state); assertEquals("exact-url:$i", row.resourceKey)
@@ -61,6 +61,50 @@ class ContentPlanStoreTest {
         }
         plans.admit("second", "different-model", "model", "{}")
         assertNull(plans.claim("second", 1))
+    }
+
+    @Test fun versionTwoParentsAndPhysicalTasksKeepReceiptsAndNewControlsSurviveReopen() {
+        val (helper, plans) = open()
+        plans.admit("parent", "family", "novel-export", "frozen-request")
+        val lease = plans.claim("parent", 1)
+        assertTrue(plans.checkpoint(lease.id, lease.attempt, "provider-receipt"))
+        helper.writableDatabase.execSQL("DROP TABLE plan_controls")
+        helper.writableDatabase.execSQL("DROP TABLE plan_children")
+        helper.writableDatabase.version = 2
+        helper.close(); this.helper = null
+        val (upgraded, recovered) = open()
+        assertEquals(3, upgraded.readableDatabase.version)
+        assertEquals("provider-receipt", recovered.get("parent").checkpoint)
+        assertEquals("frozen-request", recovered.get("parent").request)
+        assertEquals(State.RUNNING, recovered.get("parent").state)
+        recovered.selectFormat("parent", "Epub"); recovered.requestFinish("parent")
+        assertEquals("Epub", recovered.selectedFormat("parent")); assertTrue(recovered.finishRequested("parent"))
+        upgraded.close(); this.helper = null
+        val (_, reopened) = open()
+        assertEquals("Epub", reopened.selectedFormat("parent")); assertTrue(reopened.finishRequested("parent"))
+    }
+
+    @Test fun aGroupAndItsLeafHaveIndependentCapacityButStillShareTheirFamilyFence() {
+        val (_, plans) = open()
+        plans.admit("group", "group-family", "novel-series-group", "{}")
+        assertNotNull(plans.claim("group", 1))
+        plans.admit("child", "output-family", "novel-export", "{}")
+        assertNotNull(plans.claim("child", 1))
+        plans.admit("another-group", "second", "novel-series-group", "{}")
+        assertNull(plans.claim("another-group", 1))
+        plans.admit("same-family", "group-family", "model", "{}", true)
+        assertNull(plans.claim("same-family", 8))
+    }
+
+    @Test fun aColdPausedGroupCannotDispatchItsPreviouslyQueuedChild() {
+        val (_, plans) = open()
+        plans.admit("group", "group-family", "novel-series-group", "{}", false, State.PAUSED)
+        plans.ownChild("group", "output-family")
+        plans.admit("child", "output-family", "novel-export", "frozen-output")
+        assertNull(plans.claim("child", 1))
+        assertTrue(plans.resume("group")); assertNotNull(plans.claim("group", 1))
+        assertNotNull(plans.claim("child", 1))
+        assertEquals(listOf("child"), plans.children("group").map { it.id })
     }
 
     @Test fun admissionDeduplicatesOnlyAnUnfinishedFamilyAndKeepsItsFrozenRequest() {

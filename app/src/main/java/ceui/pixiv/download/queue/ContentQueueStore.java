@@ -38,7 +38,7 @@ public final class ContentQueueStore extends SQLiteOpenHelper {
     }
     public ContentQueueStore(Context context) { this(context, "content_queue.db"); }
     public ContentQueueStore(Context context, String databaseName) {
-        super(context.getApplicationContext(), databaseName, null, 2);
+        super(context.getApplicationContext(), databaseName, null, 3);
     }
     @Override public void onCreate(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE tasks (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, output_key TEXT NOT NULL, resource_key TEXT NOT NULL, pool TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL, attempt TEXT, error TEXT)");
@@ -46,10 +46,13 @@ public final class ContentQueueStore extends SQLiteOpenHelper {
         db.execSQL("CREATE INDEX tasks_output ON tasks(output_key,state)");
         db.execSQL("CREATE INDEX tasks_resource ON tasks(resource_key,state)");
         ContentPlanStore.createSchema(db);
+        ContentPlanStore.createControls(db);
     }
     @Override public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
-        if (oldVersion == 1 && newVersion == 2) ContentPlanStore.createSchema(db);
-        else throw new IllegalStateException("Explicit content queue migration required");
+        if (newVersion != 3 || oldVersion < 1 || oldVersion > 2)
+            throw new IllegalStateException("Explicit content queue migration required");
+        if (oldVersion < 2) ContentPlanStore.createSchema(db);
+        ContentPlanStore.createControls(db);
     }
     private interface Transaction<T> { T run(SQLiteDatabase db); }
     private <T> T transaction(Transaction<T> action) {

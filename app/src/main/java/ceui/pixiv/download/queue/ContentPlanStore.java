@@ -12,6 +12,10 @@ import ceui.pixiv.download.queue.ContentQueueStore.State;
 /** Durable parent intentions. A coordinating parent never consumes a physical transfer/copy slot. */
 @WorkerThread
 public final class ContentPlanStore {
+    static void createControls(SQLiteDatabase db) {
+        db.execSQL("CREATE TABLE plan_controls (plan_id TEXT PRIMARY KEY NOT NULL, finish_requested INTEGER NOT NULL DEFAULT 0, selected_format TEXT)");
+        db.execSQL("CREATE TABLE plan_children (child_family TEXT PRIMARY KEY NOT NULL, parent_id TEXT NOT NULL)");
+    }
     private final ContentQueueStore owner;
     private static final String LIVE = "('RUNNING','PAUSE_REQUESTED','YIELD_REQUESTED','CANCEL_REQUESTED','COMMITTED')";
     public ContentPlanStore(ContentQueueStore owner) { this.owner = owner; }
@@ -64,6 +68,48 @@ public final class ContentPlanStore {
             return c.moveToFirst() ? new Plan(c) : null;
         }
     }
+    public void requestFinish(String id) {
+        transaction(db -> {
+            ContentValues key = new ContentValues(); key.put("plan_id", id);
+            db.insertWithOnConflict("plan_controls", null, key, SQLiteDatabase.CONFLICT_IGNORE);
+            ContentValues value = new ContentValues(); value.put("finish_requested", 1);
+            db.update("plan_controls", value, "plan_id=?", new String[]{id}); return null;
+        });
+    }
+    public void selectFormat(String id, String format) {
+        transaction(db -> {
+            ContentValues key = new ContentValues(); key.put("plan_id", id);
+            db.insertWithOnConflict("plan_controls", null, key, SQLiteDatabase.CONFLICT_IGNORE);
+            ContentValues value = new ContentValues(); value.put("selected_format", format);
+            db.update("plan_controls", value, "plan_id=?", new String[]{id}); return null;
+        });
+    }
+    public String selectedFormat(String id) {
+        try (Cursor c = owner.getReadableDatabase().rawQuery("SELECT selected_format FROM plan_controls WHERE plan_id=?", new String[]{id})) {
+            return c.moveToFirst() && !c.isNull(0) ? c.getString(0) : null;
+        }
+    }
+    public void ownChild(String parentId, String childFamily) {
+        ContentValues value = new ContentValues(); value.put("child_family", childFamily); value.put("parent_id", parentId);
+        owner.getWritableDatabase().insertWithOnConflict("plan_children", null, value, SQLiteDatabase.CONFLICT_IGNORE);
+    }
+    public State parentState(String family) {
+        try (Cursor c = owner.getReadableDatabase().rawQuery("SELECT p.state FROM plans p JOIN plan_children c ON p.id=c.parent_id WHERE c.child_family=?", new String[]{family})) {
+            return c.moveToFirst() ? State.valueOf(c.getString(0)) : null;
+        }
+    }
+    public List<Plan> children(String parentId) {
+        List<Plan> rows = new ArrayList<>();
+        try (Cursor c = owner.getReadableDatabase().rawQuery("SELECT p.* FROM plans p JOIN plan_children c ON p.family=c.child_family WHERE c.parent_id=? ORDER BY p.seq", new String[]{parentId})) {
+            while (c.moveToNext()) rows.add(new Plan(c));
+        }
+        return rows;
+    }
+    public boolean finishRequested(String id) {
+        try (Cursor c = owner.getReadableDatabase().rawQuery("SELECT finish_requested FROM plan_controls WHERE plan_id=?", new String[]{id})) {
+            return c.moveToFirst() && c.getInt(0) != 0;
+        }
+    }
     /** Immutable request and mutable checkpoint are separate, so a retry can identify the same intent. */
     public Plan admit(String id, String family, String kind, String request) {
         return admit(id, family, kind, request, false);
@@ -89,11 +135,14 @@ public final class ContentPlanStore {
     public Plan claim(String id, int capacity) {
         if (capacity < 1) return null;
         return transaction(db -> {
-            try (Cursor c = db.rawQuery("SELECT count(*) FROM plans WHERE state IN " + LIVE, null)) {
-                c.moveToFirst(); if (c.getInt(0) >= capacity) return null;
-            }
             Plan plan = read(db, id);
             if (plan == null || plan.state != State.QUEUED) return null;
+            State parent = parentState(plan.family);
+            if (parent != null && parent != State.RUNNING) return null;
+            String lane = plan.kind.endsWith("-group") ? "substr(kind,-6)='-group'" : "substr(kind,-6)<>'-group'";
+            try (Cursor c = db.rawQuery("SELECT count(*) FROM plans WHERE " + lane + " AND state IN " + LIVE, null)) {
+                c.moveToFirst(); if (c.getInt(0) >= capacity) return null;
+            }
             try (Cursor c = db.rawQuery("SELECT 1 FROM plans WHERE family=? AND id<>? AND state IN " + LIVE + " LIMIT 1", new String[]{plan.family, id})) {
                 if (c.moveToFirst()) return null;
             }

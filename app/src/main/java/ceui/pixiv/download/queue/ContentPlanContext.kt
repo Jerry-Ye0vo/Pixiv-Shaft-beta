@@ -9,6 +9,9 @@ import kotlinx.coroutines.withContext
 
 interface ContentPlanHandler {
     val kind: String
+    /** Group coordinators may await leaf parents; they use a separate planning lane. */
+    val isGroup: Boolean get() = false
+    fun onUserResume(plan: ContentPlanStore.Plan) {}
     /** Cheap admission predicate; a policy change must call refreshEligibility, not poll per plan. */
     fun canRun(plan: ContentPlanStore.Plan): Boolean = true
     suspend fun execute(context: ContentPlanContext)
