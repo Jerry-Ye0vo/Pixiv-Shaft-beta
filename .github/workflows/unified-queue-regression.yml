@@ -26,6 +26,8 @@ jobs:
         run: |
           bash ./gradlew :app:testGithubDebugUnitTest --console=plain --build-cache \
             -PSHAFT_TEST_ABI=arm64-v8a -PSHAFT_BETA_TEST=true \
+            --tests ceui.pixiv.download.model.ModelInstallerTest \
+            --tests ceui.pixiv.download.model.ModelSharedQueueTest \
             --tests ceui.pixiv.download.queue.ContentPlanStoreTest \
             --tests ceui.pixiv.download.queue.ContentPlanQueueTest \
             --tests ceui.pixiv.download.queue.ContentPlanTicketTest \

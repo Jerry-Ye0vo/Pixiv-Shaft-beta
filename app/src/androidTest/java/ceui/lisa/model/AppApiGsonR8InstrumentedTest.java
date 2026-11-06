@@ -57,6 +57,25 @@ import retrofit2.http.GET;
 public final class AppApiGsonR8InstrumentedTest {
 
     @Test
+    public void modelParentAndInstallationReceiptsKeepTheirSchemaInRelease() throws Exception {
+        Object request = parseWire(ceui.pixiv.download.model.ModelRequest.class,
+                "{\"version\":1,\"directory\":\"rife-models\",\"asset\":\"rife\",\"required\":[\"model.onnx\"],\"operation\":\"download\",\"source\":\"https://example.com/model.zip\",\"timeoutSeconds\":120}");
+        JSONObject frozen = new JSONObject(encodeWire(request));
+        assertEquals("rife-models", frozen.getString("directory"));
+        assertEquals("model.onnx", frozen.getJSONArray("required").getString(0));
+        assertEquals(120L, frozen.getLong("timeoutSeconds"));
+        Object receipt = parseWire(ceui.pixiv.download.model.ModelInstallReceipt.class,
+                "{\"version\":1,\"plan\":\"plan:test\",\"request\":\"request-hash\",\"source\":\"source-hash\",\"files\":[{\"path\":\"model.onnx\",\"length\":123,\"sha256\":\"file-hash\"}]}");
+        JSONObject saved = new JSONObject(encodeWire(receipt));
+        assertEquals("plan:test", saved.getString("plan"));
+        assertEquals(123L, saved.getJSONArray("files").getJSONObject(0).getLong("length"));
+        assertEquals("file-hash", saved.getJSONArray("files").getJSONObject(0).getString("sha256"));
+        Object checkpoint = parseWire(ceui.pixiv.download.model.ModelCheckpoint.class,
+                "{\"version\":1,\"length\":123,\"sha256\":\"source-hash\",\"invalid\":true}");
+        assertTrue(new JSONObject(encodeWire(checkpoint)).getBoolean("invalid"));
+    }
+
+    @Test
     public void unifiedDownloadV1InputsAndReceiptsKeepTheirPersistedSchemaInRelease() throws Exception {
         Object intent = parseWire(CopyIntent.class, """
                 {"version":1,"request":{"kind":"translation","subjectId":123,"page":2,

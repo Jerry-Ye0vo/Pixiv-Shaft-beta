@@ -553,6 +553,7 @@ public class Shaft extends Application implements ServicesProvider {
         ceui.lisa.core.Manager.get().restore();
         // Typed local outputs retain their immutable inputs and receipts across process restart.
         ceui.pixiv.download.copy.QueuedCopies.get(this);
+        ceui.pixiv.download.model.QueuedModels.get(this);
 
         // :feeds 列表框架的宿主装配（主题配色 / 空态插画 / 错误文案 / Toast / 网络恢复）。
         // 必须在第一个列表页创建之前——晚了的话先建出来的页面会拿框架的 AOSP 默认配色。

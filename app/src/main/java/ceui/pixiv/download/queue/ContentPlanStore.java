@@ -54,10 +54,13 @@ public final class ContentPlanStore {
     public Plan get(String id) { return read(owner.getReadableDatabase(), id); }
     /** Immutable request and mutable checkpoint are separate, so a retry can identify the same intent. */
     public Plan admit(String id, String family, String kind, String request) {
+        return admit(id, family, kind, request, false);
+    }
+    public Plan admit(String id, String family, String kind, String request, boolean successor) {
         if (id == null || id.isEmpty() || family == null || family.isEmpty() || kind == null || kind.isEmpty() || request == null)
             throw new IllegalArgumentException("Missing parent identity");
         return transaction(db -> {
-            try (Cursor c = db.rawQuery("SELECT * FROM plans WHERE family=? AND state NOT IN ('SUCCEEDED','CANCELLED') ORDER BY seq DESC LIMIT 1", new String[]{family})) {
+            if (!successor) try (Cursor c = db.rawQuery("SELECT * FROM plans WHERE family=? AND state NOT IN ('SUCCEEDED','CANCELLED','CANCEL_REQUESTED') ORDER BY seq DESC LIMIT 1", new String[]{family})) {
                 if (c.moveToFirst()) return new Plan(c);
             }
             ContentValues v = new ContentValues(); v.put("id", id); v.put("family", family); v.put("kind", kind);

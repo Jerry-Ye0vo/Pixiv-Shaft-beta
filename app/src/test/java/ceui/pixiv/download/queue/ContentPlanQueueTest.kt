@@ -246,4 +246,54 @@ class ContentPlanQueueTest {
         assertEquals(1L, queue.store.highWaterMark())
         assertEquals(0L, runtime.store.highWaterMark())
     }
+
+    @Test fun aDurableDeleteSuccessorWaitsForAnAlreadyCommittingInstallation() = scenario {
+        val committing = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val calls = AtomicInteger()
+        register { context ->
+            if (calls.incrementAndGet() == 1) context.commit {
+                committing.complete(Unit); withTimeout(5_000) { release.await() }
+            } else context.commit {}
+        }
+        val first = submit(); committing.await()
+        val next = queue.submit(first.family, "model", replaceActive = true) { "delete" }
+        eventually { queue.store.get(next.id)?.state == State.QUEUED }
+        assertFalse(first.cancel()); assertNotEquals(first.id, next.id); assertEquals(1, calls.get())
+        release.complete(Unit)
+        assertEquals(State.SUCCEEDED, end(first).state)
+        assertEquals(State.SUCCEEDED, end(next).state); assertEquals(2, calls.get())
+    }
+
+    @Test fun aSuccessorCanBeAdmittedDuringCancelButWaitsForThePredecessorsHandlerCleanup() = scenario {
+        val entered = CompletableDeferred<Unit>()
+        val cleaning = CompletableDeferred<Unit>()
+        val releaseCleanup = CompletableDeferred<Unit>()
+        val calls = AtomicInteger()
+        queue.register(object : ContentPlanHandler {
+            override val kind = "model"
+            override suspend fun execute(context: ContentPlanContext) {
+                if (calls.incrementAndGet() == 1) { entered.complete(Unit); awaitCancellation() }
+                context.commit {}
+            }
+            override suspend fun cleanup(plan: ContentPlanStore.Plan, state: State) {
+                if (state == State.CANCELLED) {
+                    cleaning.complete(Unit)
+                    withTimeout(5_000) { releaseCleanup.await() }
+                }
+            }
+        })
+        val first = submit(); entered.await()
+        assertTrue(first.cancel())
+        val next = submit()
+        cleaning.await()
+        eventually { queue.store.get(next.id)?.state == State.QUEUED }
+        assertNotEquals(first.id, next.id)
+        assertEquals(State.CANCEL_REQUESTED, queue.store.get(first.id).state)
+        assertEquals(1, calls.get())
+        releaseCleanup.complete(Unit)
+        assertEquals(State.CANCELLED, end(first).state)
+        assertEquals(State.SUCCEEDED, end(next).state)
+        assertEquals(2, calls.get())
+    }
 }

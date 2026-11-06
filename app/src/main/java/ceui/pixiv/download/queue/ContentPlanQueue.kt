@@ -83,18 +83,21 @@ class ContentPlanQueue(
     }
 
     /** The immutable request factory executes on IO. Identical stopped intentions can be resumed. */
-    fun submit(family: String, kind: String, resumeStopped: Boolean = true,
+    fun submit(family: String, kind: String, resumeStopped: Boolean = true, replaceActive: Boolean = false,
                request: suspend () -> String): ContentPlanTicket {
         require(family.isNotBlank() && kind.isNotBlank())
         check(executing.get() == null) { "Parent workers/factories must schedule physical stages, not another parent" }
         val ticket = synchronized(lock) {
             val existing = families[family]
-            if (existing != null && existing.status.value.state !in ContentPlanTicket.OBSERVABLE_END) return existing
+            if (existing != null && existing.status.value.state !in ContentPlanTicket.OBSERVABLE_END && existing.stop() != ContentPlanTicket.CANCEL) {
+                if (!replaceActive) return existing
+                existing.cancel() // a commit may already own the gate; the durable successor still waits
+            }
             ContentPlanTicket("plan:" + UUID.randomUUID(), family, kind).also { families[family] = it }
         }
         initializationFailure?.let { ticket.publish(State.FAILED, it.message); publish(ticket); return ticket }
         ticket.signal = { requestPump() }
-        commands.trySend { admit(ticket, resumeStopped, request) }
+        commands.trySend { admit(ticket, resumeStopped, replaceActive, request) }
         return ticket
     }
     fun ticket(id: String): ContentPlanTicket? = tickets[id]
@@ -112,12 +115,15 @@ class ContentPlanQueue(
         synchronized(Companion) { if (singleton?.second === this) singleton = null }
     }
 
-    private suspend fun admit(reservation: ContentPlanTicket, resumeStopped: Boolean, factory: suspend () -> String) {
+    private suspend fun admit(reservation: ContentPlanTicket, resumeStopped: Boolean, successor: Boolean, factory: suspend () -> String) {
         try {
             reservation.checkStop()
             check(handlers.containsKey(reservation.kind)) { "No worker registered for ${reservation.kind}" }
             val request = withContext(executing.asContextElement("admission:" + reservation.id)) { factory() }
-            var plan = store.admit(reservation.id, reservation.family, reservation.kind, request)
+            // A new user intention can queue while the cancelled predecessor still closes its body.
+            tickets.values.filter { it.family == reservation.family && it.stop() == ContentPlanTicket.CANCEL }
+                .forEach { store.cancel(it.id) }
+            var plan = store.admit(reservation.id, reservation.family, reservation.kind, request, successor)
             if (plan.kind != reservation.kind || plan.request != request) {
                 if (plan.state !in setOf(State.PAUSED, State.FAILED)) error("A different parent intention is already active")
                 store.cancel(plan.id)
@@ -178,6 +184,7 @@ class ContentPlanQueue(
                     plan = requireNotNull(store.get(ticket.id))
                 }
                 if (plan.state in setOf(State.CANCEL_REQUESTED, State.PAUSE_REQUESTED, State.YIELD_REQUESTED)) worker.cancel()
+                ticket.publish(plan.state, plan.error); publish(ticket)
                 continue
             }
             if (plan.state in setOf(State.CANCELLED, State.PAUSED, State.FAILED)) {
@@ -188,6 +195,7 @@ class ContentPlanQueue(
             val handler = handlers[plan.kind] ?: continue
             if (plan.state != State.QUEUED) continue
             if (!eligible(handler, plan)) continue
+            if (workers.keys.any { tickets[it]?.family == plan.family }) continue
             val lease = store.claim(plan.id, width.coerceIn(1, 8)) ?: continue
             ticket.publish(State.RUNNING); publish(ticket)
             workers[ticket.id] = scope.launch(start = CoroutineStart.LAZY) { run(ticket, lease, handler) }.also { it.start() }
@@ -212,11 +220,16 @@ class ContentPlanQueue(
                             else -> if (failure is CancellationException) store.pause(lease.id)
                         }
                     }
+                    var before = requireNotNull(store.get(lease.id))
+                    if (context.outputCommitted && before.state != State.COMMITTED) {
+                        check(store.markCommitted(lease.id, lease.attempt)) { "Parent output receipt could not commit" }
+                        before = requireNotNull(store.get(lease.id))
+                    }
+                    val terminal = if (context.outputCommitted) State.SUCCEEDED
+                        else if (before.state == State.CANCEL_REQUESTED) State.CANCELLED else null
+                    if (terminal != null) cleanup(handler, before, terminal)
                     check(store.finish(lease.id, lease.attempt, context.outputCommitted, failure?.message)) { "Stale parent acknowledgement" }
                     val finished = requireNotNull(store.get(lease.id))
-                    if (finished.state in setOf(State.SUCCEEDED, State.CANCELLED)) {
-                        cleanup(handler, finished, finished.state)
-                    }
                     commands.send {
                         workers.remove(lease.id)
                         ticket.finished(finished.state)

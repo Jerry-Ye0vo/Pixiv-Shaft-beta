@@ -13,9 +13,7 @@ import ceui.lisa.utils.ClipBoardUtils
 import ceui.lisa.utils.Common
 import ceui.pixiv.witstudio.dialog.WitDialog
 import ceui.pixiv.witstudio.dialog.WitDialogAction
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import timber.log.Timber
 
 /**
@@ -84,13 +82,15 @@ class ModelImportController(
         val ctx = fragment.context ?: return
         if (!fragment.isAdded || fragment.view == null) return
         importInFlight = true
+        val ticket = manager.startImport(ctx, model, uri)
         onImportStarted()
         fragment.viewLifecycleOwner.lifecycleScope.launch {
-            val success = withContext(Dispatchers.IO) {
-                manager.importModel(ctx, model, uri, onProgress)
+            try {
+                val success = manager.observe(ctx, ticket, onProgress)
+                onImported(success)
+            } finally {
+                importInFlight = false
             }
-            importInFlight = false
-            onImported(success)
         }
     }
 
@@ -108,3 +108,4 @@ class ModelImportController(
             arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream")
     }
 }
+

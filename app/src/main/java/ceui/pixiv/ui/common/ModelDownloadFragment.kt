@@ -12,6 +12,8 @@ import ceui.lisa.utils.Common
 import ceui.pixiv.utils.setOnClick
 import ceui.pixiv.witstudio.dialog.WitDialog
 import ceui.pixiv.witstudio.dialog.WitDialogAction
+import ceui.pixiv.download.queue.ContentPlanTicket
+import ceui.pixiv.download.model.QueuedModels
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
@@ -61,6 +63,14 @@ abstract class ModelDownloadFragment : BaseLazyFragment<FragmentRembgModelDownlo
             showDoneState()
         } else {
             showInitState()
+        }
+        viewLifecycleOwner.lifecycleScope.launch {
+            QueuedModels.get(requireContext()).queue.ready.await()
+            val active = getManager().current(requireContext(), model)
+            if (active != null && active.status.value.state !in ContentPlanTicket.OBSERVABLE_END) {
+                showDownloadingState()
+                observeDownload(active)
+            }
         }
     }
 
@@ -166,9 +176,13 @@ abstract class ModelDownloadFragment : BaseLazyFragment<FragmentRembgModelDownlo
         downloadJob?.cancel()
         downloadJob = null
         val ctx = context ?: return
-        getManager().deleteModel(ctx, model)
-        if (!isAdded || view == null) return
-        showInitState()
+        val ticket = getManager().deleteModel(ctx, model)
+        showDownloadingState()
+        downloadJob = viewLifecycleOwner.lifecycleScope.launch {
+            val success = getManager().observe(ctx, ticket)
+            if (!isAdded || view == null) return@launch
+            if (success) showInitState() else showErrorState()
+        }
     }
 
     private fun showErrorState() {
@@ -190,12 +204,17 @@ abstract class ModelDownloadFragment : BaseLazyFragment<FragmentRembgModelDownlo
 
     private fun startDownload() {
         showDownloadingState()
+        observeDownload(getManager().startDownload(requireContext(), model))
+    }
+
+    private fun observeDownload(ticket: ContentPlanTicket) {
+        downloadJob?.cancel()
         downloadJob = viewLifecycleOwner.lifecycleScope.launch {
-            val success = getManager().downloadModel(requireContext(), model) { bytesRead, totalBytes ->
+            val success = getManager().observe(requireContext(), ticket) { bytesRead, totalBytes ->
                 val now = System.currentTimeMillis()
-                if (now - lastUIUpdateTime < 300) return@downloadModel
+                if (now - lastUIUpdateTime < 300) return@observe
                 lastUIUpdateTime = now
-                val root = view ?: return@downloadModel
+                val root = view ?: return@observe
                 root.post {
                     if (!isAdded || view == null) return@post
                     val percent = if (totalBytes > 0) (bytesRead * 100 / totalBytes).toInt() else 0
@@ -268,10 +287,11 @@ abstract class ModelDownloadFragment : BaseLazyFragment<FragmentRembgModelDownlo
     }
 
     private fun cancelDownload() {
+        val ticket = getManager().current(requireContext(), model)
+        if (ticket != null && !ticket.cancel()) return
         downloadJob?.cancel()
         downloadJob = null
-        getManager().deleteModel(requireContext(), model)
-        showInitState()
+        if (getManager().isModelReady(requireContext(), model)) showDoneState() else showInitState()
     }
 
     private fun showCopyOrImportDialog() {
@@ -325,3 +345,4 @@ abstract class ModelDownloadFragment : BaseLazyFragment<FragmentRembgModelDownlo
         importController?.showCopyOrImportDialog()
     }
 }
+
