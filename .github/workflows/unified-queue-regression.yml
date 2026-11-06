@@ -26,6 +26,10 @@ jobs:
         run: |
           bash ./gradlew :app:testGithubDebugUnitTest --console=plain --build-cache \
             -PSHAFT_TEST_ABI=arm64-v8a -PSHAFT_BETA_TEST=true \
+            --tests ceui.pixiv.snapshot.SnapshotAssetTransfersTest \
+            --tests ceui.pixiv.snapshot.SnapshotPathSafetyTest \
+            --tests ceui.pixiv.snapshot.SnapshotUgoiraValidationTest \
+            --tests ceui.pixiv.snapshot.SnapshotParallelMapTest \
             --tests ceui.pixiv.download.queue.ContentPhaseRunnerTest \
             --tests ceui.pixiv.ui.bulk.UgoiraQueuedZipTest \
             --tests ceui.pixiv.ui.bulk.UgoiraZipResumeTest \

@@ -12,6 +12,8 @@ import ceui.pixiv.utils.hasTrustedCaption
 import ceui.pixiv.utils.isFullDetail
 import ceui.pixiv.utils.reconcileViewerStateFromMirror
 import ceui.pixiv.imageloader.ImageLoaderV3
+import ceui.pixiv.imageloader.ResumableOkHttpFetcher
+import ceui.pixiv.download.queue.ContentPhases
 import ceui.pixiv.ui.bulk.UgoiraEngine
 import ceui.pixiv.ui.bulk.UgoiraVideoEncoder
 import ceui.pixiv.ui.bulk.readFramesDir
@@ -34,12 +36,18 @@ import java.util.concurrent.atomic.AtomicInteger
  * 从在线详情页生成一份离线快照。
  *
  * 数据源优先级：ObjectPool 已有完整元数据 -> 缺失时回 v1/illust/detail 补齐；
- * 图片优先复用 ImageLoaderV3 已下好的共享文件，缺失时由它联网拉取。
+ * 图片优先复用对应 URL 的缓存；补下载经共享 NETWORK，复制和元数据提交经 COPY。
  * 动图另存一份帧序列（见 [copyUgoiraFrames]），p0 那张静图照常存，作封面与播放前的打底图。
  *
  * 正式快照写 manifest.json；自动快照写 auto_manifest.json（内部格式，转正后才成为正式快照）。
  */
 object SnapshotGenerator {
+    private val transfers by lazy {
+        SnapshotAssetTransfers(ContentPhases.runner(Shaft.getContext())) { url ->
+            ResumableOkHttpFetcher.acquire(url, {}, saving = true)
+        }
+    }
+
 
     /**
      * 已就绪页的本地复制宽度。这一段是纯本地 IO、不碰网络，可以宽一些；再往上只会让同一批
@@ -193,8 +201,8 @@ object SnapshotGenerator {
             val copyGate = Semaphore(COPY_PARALLELISM)
             val downloadGate = Semaphore(DOWNLOAD_PARALLELISM)
 
-            fun copyPage(plan: SnapshotPage, source: File) {
-                copyFileTo(source, File(snapshotDir, plan.rel))
+            suspend fun copyPage(plan: SnapshotPage, cached: File? = null) {
+                copyAssetUrl(appContext, plan.url, File(snapshotDir, plan.rel), plan.isOriginal, cached)
             }
 
             coroutineScope {
@@ -202,8 +210,7 @@ object SnapshotGenerator {
                 // 不会一次性把 N 页请求全打出去。
                 val pendingJobs = pendingPages.map { plan ->
                     async {
-                        val source = downloadGate.withPermit { fetchFile(appContext, plan.url, plan.isOriginal) }
-                        copyGate.withPermit { copyPage(plan, source) }
+                        downloadGate.withPermit { copyPage(plan) }
                         progress(R.string.snapshot_progress_images, donePages.incrementAndGet(), pageCount)
                     }
                 }
@@ -402,30 +409,23 @@ object SnapshotGenerator {
     }
 
     private suspend fun copyUrlTo(context: Context, url: String, target: File) {
-        copyFileTo(fetchFile(context, url), target)
+        copyAssetUrl(context, url, target, cached = ImageLoaderV3.peekCachedFile(url, false))
     }
 
-    /**
-     * 取回一个 url 的可用文件。
-     *
-     * 失败统一包成 [SnapshotException]；取消照旧往上抛 —— 页面销毁导致的取消不是「下载失败」，
-     * 包成异常会让上层把一次取消当错误处理。
-     */
-    private suspend fun fetchFile(context: Context, url: String, isOriginal: Boolean = false): File = try {
-        ImageLoaderV3.obtain(url, isOriginal = isOriginal).awaitFile()
-    } catch (ce: CancellationException) {
-        throw ce
-    } catch (e: Exception) {
-        throw SnapshotException(context.getString(R.string.snapshot_error_image_download, url), e)
+    private suspend fun copyAssetUrl(context: Context, url: String, target: File,
+                                     original: Boolean = false, cached: File? = null) {
+        try {
+            transfers.copyUrl(url, target, original, cached)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            throw SnapshotException(context.getString(R.string.snapshot_error_image_download, url), error)
+        }
     }
 
-    /** 把已就绪的文件复制进快照目录。纯本地 IO，不联网。 */
-    private fun copyFileTo(source: File, target: File) {
-        target.parentFile?.mkdirs()
-        source.copyTo(target, overwrite = true)
-    }
+    private suspend fun copyFileTo(source: File, target: File) = transfers.copyFile(source, target)
 
-    private fun <T> writeJson(dir: File, name: String, value: T) {
-        File(dir, name).writeText(Shaft.sGson.toJson(value))
+    private suspend fun <T> writeJson(dir: File, name: String, value: T) {
+        transfers.writeText(File(dir, name), Shaft.sGson.toJson(value))
     }
 }
