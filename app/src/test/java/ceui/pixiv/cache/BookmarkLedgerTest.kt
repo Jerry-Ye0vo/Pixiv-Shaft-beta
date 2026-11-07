@@ -34,6 +34,8 @@ class BookmarkLedgerTest {
     @Test fun unchangedConfirmationStillFencesAnOlderRequest() {
         val ledger = BookmarkLedger { 1 }
         ledger.local(42, true)
+        // An omitted server field is unknown, rather than evidence of an unbookmark.
+        assertTrue(ledger.response(Illust(id = 42, is_bookmarked = null), ledger.request()).isBookmarked)
         val old = ledger.request()
         ledger.response(Illust(id = 42, is_bookmarked = true), ledger.request())
         assertTrue(ledger.response(Illust(id = 42, is_bookmarked = false), old).isBookmarked)

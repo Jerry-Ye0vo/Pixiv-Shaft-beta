@@ -13,8 +13,10 @@ import ceui.pixiv.api.Client
 import ceui.pixiv.api.model.Illust
 import ceui.pixiv.api.model.IllustResponse
 import ceui.pixiv.api.model.NovelResponse
+import ceui.pixiv.cache.IllustBookmarks
 import ceui.pixiv.feeds.FeedViewModel
 import ceui.pixiv.feeds.LoadState
+import ceui.pixiv.session.SessionManager
 import ceui.pixiv.ui.common.IllustFeedItem
 import ceui.pixiv.ui.common.IllustMuteStore
 import ceui.pixiv.ui.common.NovelFeedItem
@@ -58,6 +60,9 @@ class FollowingBookmarkFilterTest {
     @Before
     fun setUp() {
         Dispatchers.setMain(dispatcher)
+        // Each fixture is an independent viewer session. Robolectric reuses the application
+        // classloader, so another test's confirmed ID must not turn this fixture's null into true.
+        IllustBookmarks.state.forget(SessionManager.loggedInUid)
         oldSettings = Shaft.sSettings
         oldGson = Shaft.sGson
         oldMuteLoaded = ReflectionHelpers.getField(IllustMuteStore, "loaded")
@@ -83,6 +88,7 @@ class FollowingBookmarkFilterTest {
     @After
     fun tearDown() {
         controller.destroy()
+        IllustBookmarks.state.forget(SessionManager.loggedInUid)
         ReflectionHelpers.setField(Client, "_appApi", oldApi)
         ReflectionHelpers.setField(IllustMuteStore, "loaded", oldMuteLoaded)
         Shaft.sSettings = oldSettings
