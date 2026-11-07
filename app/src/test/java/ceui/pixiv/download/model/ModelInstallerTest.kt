@@ -88,4 +88,20 @@ class ModelInstallerTest {
             try { bad.target(temporary.root); fail("Unsafe frozen request accepted") } catch (expected: IllegalArgumentException) { }
         }
     }
+
+    @Test fun standaloneOnnxUsesPinnedDigestAndTheSameAtomicInstallation() = runBlocking {
+        val input = temporary.newFile().apply { writeText("standalone model bytes") }
+        val hash = ModelInstaller.digest(input)
+        val spec = request.copy(directory = "image-tagger-models", rawFile = "model.onnx", expectedSha256 = hash)
+        spec.validate()
+        val worker = installer(spec = spec); old(worker)
+        fails { worker.prepare(input, "wrong-hash") }
+        assertEquals("previous", File(worker.target, "model.onnx").readText())
+        worker.prepare(input, hash); worker.install()
+        assertEquals(input.readText(), File(worker.target, "model.onnx").readText())
+        assertTrue(worker.installed())
+        assertThrows(IllegalArgumentException::class.java) { spec.copy(expectedSha256 = null).validate() }
+        assertThrows(IllegalArgumentException::class.java) { spec.copy(rawFile = "../model.onnx").validate() }
+        Unit
+    }
 }

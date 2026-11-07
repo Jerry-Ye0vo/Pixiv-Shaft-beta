@@ -14,6 +14,9 @@ data class ModelRequest(
     val operation: String,
     val source: String,
     val timeoutSeconds: Long = 60,
+    /** A pinned standalone model. Null retains the legacy ZIP installation protocol. */
+    val rawFile: String? = null,
+    val expectedSha256: String? = null,
 ) {
     val family: String get() = "model:$directory/$asset"
     fun validate() {
@@ -22,13 +25,17 @@ data class ModelRequest(
         require(required.isNotEmpty() && required.distinct().size == required.size)
         require(required.all { relative(it) && it != ModelInstaller.RECEIPT })
         require(timeoutSeconds in 1..600)
+        rawFile?.let {
+            require(segment(it) && required == listOf(it))
+            require(expectedSha256?.matches(Regex("[a-f0-9]{64}")) == true)
+        }
         if (operation == DOWNLOAD) require(source.startsWith("https://") || source.startsWith("http://"))
         if (operation == IMPORT) require(source.startsWith("content://") || source.startsWith("file://"))
     }
     fun target(files: File): File { validate(); return File(File(files, directory), asset) }
     companion object {
         const val DOWNLOAD = "download"; const val IMPORT = "import"; const val DELETE = "delete"
-        private val DIRECTORIES = setOf("rembg-models", "rife-models", "manga-ocr-models", "comic-text-detector-models", "translation-models")
+        private val DIRECTORIES = setOf("rembg-models", "rife-models", "manga-ocr-models", "comic-text-detector-models", "translation-models", "image-tagger-models")
         internal fun segment(value: String) = value.isNotBlank() && value != "." && value != ".." &&
             !value.contains('/') && !value.contains('\\') && !value.contains('\u0000')
         internal fun relative(value: String) = value.split('/').all { segment(it) }

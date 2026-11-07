@@ -40,6 +40,24 @@ internal class ModelInstaller(files: File, val request: ModelRequest, val plan: 
 
     suspend fun prepare(source: File, sourceHash: String) {
         check(source.isFile && source.length() >= 4) { "Empty model package" }
+        request.expectedSha256?.let { if (sourceHash != it) throw IOException("Model checksum does not match the pinned version") }
+        if (request.rawFile != null) {
+            remove(staging)
+            if (!staging.mkdirs()) throw IOException("Cannot create model staging directory")
+            FileOutputStream(File(staging, request.rawFile)).use { out ->
+                source.inputStream().use { input ->
+                    val buffer = ByteArray(32 * 1024)
+                    while (true) {
+                        currentCoroutineContext().ensureActive()
+                        val count = input.read(buffer); if (count < 0) break
+                        out.write(buffer, 0, count)
+                    }
+                }
+                out.fd.sync()
+            }
+            writeReceipt(sourceHash)
+            return
+        }
         source.inputStream().use { input ->
             val magic = ByteArray(4)
             if (input.read(magic) != 4 || !magic.contentEquals(byteArrayOf(0x50, 0x4b, 3, 4)))
@@ -80,6 +98,10 @@ internal class ModelInstaller(files: File, val request: ModelRequest, val plan: 
                 zip.closeEntry() // verifies CRC before any installed model is touched
             }
         }
+        writeReceipt(sourceHash)
+    }
+
+    private suspend fun writeReceipt(sourceHash: String) {
         val files = request.required.sorted().map { path ->
             val file = File(staging, path)
             if (!file.isFile || file.length() == 0L) throw IOException("Required model file missing or empty: $path")

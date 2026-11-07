@@ -172,6 +172,7 @@ object TemplateRouteFactory {
                     intent.getBooleanExtra(Params.PREFER_PRESERVE, false),
                 )
             TemplateRoute.NANA7MI_USAGE -> Nana7miUsageFragment()
+            TemplateRoute.LOCAL_PROFILE -> ceui.pixiv.ui.profile.ProfileFragment()
             TemplateRoute.SETTINGS -> FragmentSettingsHub()
             TemplateRoute.SETTINGS_CATEGORY ->
                 SettingsCatalog.fragmentFor(intent.getStringExtra(SettingsCatalog.EXTRA_CATEGORY))

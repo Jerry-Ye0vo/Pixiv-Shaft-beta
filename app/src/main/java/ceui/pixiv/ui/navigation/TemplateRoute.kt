@@ -146,6 +146,7 @@ enum class TemplateRoute(@JvmField val key: String) {
     /** 图片滤镜：作品某一页套热门滤镜、微调后保存或分享。 */
     IMAGE_FILTER("图片滤镜"),
     EVENT_HISTORY("操作记录"),
+    LOCAL_PROFILE("本地用户画像"),
     DEBUG_NETWORK_TEST("网络测试"),
     SYNONYM_DICT("同义词词典"),
     CHAT("聊天室"),

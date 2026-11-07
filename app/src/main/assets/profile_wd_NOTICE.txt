@@ -1,0 +1,6 @@
+WD ConvNeXt Tagger V3: SmilingWolf.
+INT8 quantization and tag mapping: Smashinfries.
+Licensed under Apache License 2.0; see licenses/profile-wd-apache-2.0.txt.
+Base model: https://huggingface.co/SmilingWolf/wd-convnext-tagger-v3
+Quantized model and vocabulary: https://huggingface.co/Smashinfries/wd-convnext-tagger-v3-mobile/tree/f574b1b7c24a41b275fa0169f5a6905402f58870
+The model weights are downloaded only on explicit user request and are not bundled in this APK.

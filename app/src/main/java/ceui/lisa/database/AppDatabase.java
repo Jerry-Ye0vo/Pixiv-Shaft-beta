@@ -31,6 +31,7 @@ import timber.log.Timber;
         entities = {
                 IllustHistoryEntity.class, //浏览历史
                 DownloadEntity.class, //下载历史
+                ceui.pixiv.ui.profile.LocalImageTags.class,
                 ceui.pixiv.db.BookmarkKnowledgeEntity.class, // 当前账号已确认的收藏状态
                 UserEntity.class, //多用户保存信息
                 SearchEntity.class, //搜索历史
@@ -64,7 +65,9 @@ public abstract class AppDatabase extends RoomDatabase {
 
     public abstract ceui.pixiv.db.BookmarkKnowledgeDao bookmarkKnowledgeDao();
 
-    public static final int VERSION = 46;
+    public abstract ceui.pixiv.ui.profile.ProfileAnalyticsDao profileAnalyticsDao();
+
+    public static final int VERSION = 47;
     public static final String DATABASE_NAME = "roomDemo-database";
 
     /** 迁移/开库相关日志的 tag。升级出问题时 `adb logcat -s AppDatabase` 一把抓。 */
@@ -633,6 +636,13 @@ public abstract class AppDatabase extends RoomDatabase {
         }
     };
 
+    private static final Migration MIGRATION_46_47 = new Migration(46, 47) {
+        @Override public void migrate(@NonNull SupportSQLiteDatabase database) {
+            database.execSQL("CREATE TABLE IF NOT EXISTS local_image_tags (uri TEXT NOT NULL, modelVersion TEXT NOT NULL, sourceStamp TEXT NOT NULL, sha256 TEXT NOT NULL, tagsJson TEXT NOT NULL, elapsedMs INTEGER NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(uri, modelVersion))");
+            database.execSQL("CREATE INDEX IF NOT EXISTS index_local_image_tags_sha256_modelVersion ON local_image_tags(sha256, modelVersion)");
+        }
+    };
+
     private static final Migration[] ALL_MIGRATIONS = {
             MIGRATION_23_24,
             MIGRATION_24_25,
@@ -657,6 +667,7 @@ public abstract class AppDatabase extends RoomDatabase {
             MIGRATION_43_44,
             MIGRATION_44_45,
             MIGRATION_45_46,
+            MIGRATION_46_47,
     };
 
     /**

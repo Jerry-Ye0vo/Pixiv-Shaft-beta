@@ -66,6 +66,8 @@ public final class DrawerIconCatalog {
             return R.drawable.ic_baseline_dns_24;
         } else if (actionId == R.id.nav_referral_plan) {
             return R.drawable.ic_share_black_24dp;
+        } else if (actionId == R.id.nav_local_profile) {
+            return R.drawable.ic_baseline_data_usage_24;
         } else if (actionId == R.id.nav_nana7mi_usage) {
             return R.drawable.ic_baseline_data_usage_24;
         } else if (actionId == R.id.nav_web_home) {

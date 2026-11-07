@@ -19,7 +19,8 @@ import org.json.JSONObject
 internal enum class TaskOwner { PLAN, COPY, APK }
 internal data class ContentTaskRow(val id: String, val owner: TaskOwner, val category: String,
     val title: String, val state: State?, val phase: String = "", val error: String? = null,
-    val bytes: Long = 0, val total: Long = -1, val needsFormat: Boolean = false, val group: Boolean = false) {
+    val bytes: Long = 0, val total: Long = -1, val needsFormat: Boolean = false, val group: Boolean = false,
+    val itemProgress: Boolean = false) {
     val active get() = state !in setOf(State.SUCCEEDED, State.CANCELLED)
     val running get() = state in setOf(State.RUNNING, State.COMMITTED)
     val resumable get() = state in setOf(State.QUEUED, State.PAUSED, State.FAILED)
@@ -50,6 +51,7 @@ internal class UnifiedContentTasks(context: Context) {
         val plan = plans.store.get(status.id)
         val json = runCatching { JSONObject(plan?.request ?: "{}") }.getOrDefault(JSONObject())
         val category = when (status.kind) {
+            "profile-tagging" -> app.getString(ceui.lisa.R.string.profile_tagging_title)
             "novel-export", "novel-series-group" -> "小说"
             "image-derivative" -> "图片导出"
             "reader-font" -> "阅读字体"
@@ -62,7 +64,7 @@ internal class UnifiedContentTasks(context: Context) {
         }
         val nested = (json.optString("novelJson").takeIf { it.isNotBlank() } ?: json.optString("illustJson"))
             .takeIf { it.isNotBlank() }?.let { runCatching { JSONObject(it) }.getOrNull() }
-        val name = json.optJSONObject("merged")?.optString("title")
+        val name = if (status.kind == "profile-tagging") category else json.optJSONObject("merged")?.optString("title")
             ?: nested?.optString("title") ?: json.optJSONArray("series")?.optJSONObject(0)?.optString("title")
             ?: json.optJSONObject("destination")?.optJSONArray("segments")?.let { it.optString(it.length() - 1) }
             ?: json.optString("asset").takeIf { it.isNotBlank() }
@@ -81,7 +83,7 @@ internal class UnifiedContentTasks(context: Context) {
                         plans.store.selectedFormat(status.id) == null &&
                         (status.phase == "await-format" || runCatching {
                             JSONObject(plans.store.get(status.id).checkpoint).optBoolean("awaitingFormat") }.getOrDefault(false)),
-                    group = status.kind == "novel-series-group")
+                    group = status.kind == "novel-series-group", itemProgress = status.kind == "profile-tagging")
             }
             val copyRows = files.values.map { row -> ContentTaskRow(row.id, TaskOwner.COPY, "图片保存",
                 row.request?.destination?.relativePath()?.filename ?: "本地图片", row.state, error = row.error) }

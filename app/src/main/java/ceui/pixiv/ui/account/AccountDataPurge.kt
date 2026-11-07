@@ -93,6 +93,7 @@ object AccountDataPurge {
             if (purgeLocalData) {
                 ceui.pixiv.cache.IllustBookmarks.state.forget(targetUid)
                 db.bookmarkKnowledgeDao().deleteOwner(targetUid)
+                ceui.pixiv.ui.profile.ProfileRepository.forget(app, targetUid)
             }
             Timber.tag(TAG).i(
                 "已从本地移除账号 %d（一并清理关联数据=%b）", targetUid, purgeLocalData

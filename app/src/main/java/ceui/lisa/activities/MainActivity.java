@@ -962,6 +962,7 @@ public class MainActivity extends BaseActivity<ActivityCoverBinding>
                 new DrawerEntry[] {
                     new DrawerEntry(nav_slideshow, R.string.view_history),
                     new DrawerEntry(nav_gallery, R.string.download_manager),
+                    new DrawerEntry(R.id.nav_local_profile, R.string.profile_title),
                     new DrawerEntry(R.id.nav_snapshot, R.string.snapshot_manager_title),
                     new DrawerEntry(
                             R.id.nav_notifications,
@@ -1075,6 +1076,9 @@ public class MainActivity extends BaseActivity<ActivityCoverBinding>
         } else if (id == R.id.nav_referral_plan) {
             intent = new Intent(mContext, TemplateActivity.class);
             intent.putExtra(TemplateActivity.EXTRA_FRAGMENT, TemplateRoute.REFERRAL_PLAN.key);
+        } else if (id == R.id.nav_local_profile) {
+            intent = new Intent(mContext, TemplateActivity.class);
+            intent.putExtra(TemplateActivity.EXTRA_FRAGMENT, TemplateRoute.LOCAL_PROFILE.key);
         } else if (id == R.id.nav_nana7mi_usage) {
             intent = new Intent(mContext, TemplateActivity.class);
             intent.putExtra(TemplateActivity.EXTRA_FRAGMENT, TemplateRoute.NANA7MI_USAGE.key);
