@@ -366,7 +366,7 @@ jobs:
           arch: x86_64
           profile: pixel_7_pro
           script: |
-            ./gradlew :app:connectedGithubDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=ceui.lisa.database.AppDatabaseMigrationTest -PSHAFT_TEST_ABI=x86_64 --stacktrace
+            ./gradlew :app:connectedGithubDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=ceui.lisa.database.AppDatabaseMigrationTest,ceui.pixiv.ui.profile.ProfileTaggerNativeTest -PSHAFT_TEST_ABI=x86_64 --stacktrace
             ./gradlew :app:connectedGithubReleaseAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=ceui.lisa.ExampleInstrumentedTest,ceui.lisa.model.AppApiGsonR8InstrumentedTest,ceui.pixiv.shaftapi.ShaftHmacInstrumentedTest,ceui.pixiv.ui.search.SearchRiskPolicyInstrumentedTest -PSHAFT_TEST_BUILD_TYPE=release -PSHAFT_TEST_ABI=x86_64 --stacktrace
             ./gradlew :actionqueue:connectedDebugAndroidTest --stacktrace
 

@@ -1,0 +1,66 @@
+name: Local profile and offline tagging regression
+on:
+  push:
+    branches: [feat/local-profile-statistics]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Test statistics, tagging, legacy model installs and account cleanup
+        run: |
+          bash ./gradlew :app:testGithubDebugUnitTest --console=plain --build-cache \
+            -PSHAFT_TEST_ABI=arm64-v8a -PSHAFT_BETA_TEST=true \
+            --tests 'ceui.pixiv.ui.profile.*' \
+            --tests ceui.pixiv.download.model.ModelInstallerTest \
+            --tests ceui.pixiv.download.model.ModelSharedQueueTest \
+            --tests ceui.pixiv.ui.account.AccountDataPurgeTest
+      - name: Summarize regression results
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          rows = []
+          paths = sorted(Path('app/build/test-results').rglob('TEST-*.xml')) + sorted(Path('feeds/build/test-results').rglob('TEST-*.xml'))
+          for path in paths:
+              root = ET.parse(path).getroot()
+              for case in root.findall('testcase'):
+                  for problem in list(case.findall('failure')) + list(case.findall('error')):
+                      print(f"FAILED {root.attrib.get('name')} :: {case.attrib.get('name')}")
+                      print((problem.text or problem.attrib.get('message', ''))[:16000])
+              rows.append((root.attrib.get('name', path.stem), *(int(root.attrib.get(k, 0)) for k in ('tests', 'failures', 'errors', 'skipped'))))
+          totals = [sum(row[i] for row in rows) for i in range(1, 5)]
+          report = ['| Suite | Tests | Failures | Errors | Skipped |', '| --- | ---: | ---: | ---: | ---: |']
+          report += ['| ' + ' | '.join(map(str, row)) + ' |' for row in rows]
+          report += ['| TOTAL | ' + ' | '.join(map(str, totals)) + ' |']
+          print('\n'.join(report) if rows else 'No JUnit reports produced; inspect the Gradle step.')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('\n'.join(report) if rows else 'No JUnit reports produced.\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: profile-regression
+          path: |
+            app/build/reports/tests/
+            app/build/test-results/
+            app/build/profile-previews/
+          if-no-files-found: ignore
+
