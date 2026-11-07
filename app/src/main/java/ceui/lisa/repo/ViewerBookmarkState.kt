@@ -30,7 +30,9 @@ internal object ViewerBookmarkState {
 
     suspend fun ListIllust.withViewerBookmarkState(mirror: BookmarkMirrorService): ListIllust {
         val source = illusts ?: return this
+        val viewer = ceui.pixiv.cache.IllustBookmarks.state.request().ownerUid
         val mirrored = mirror.bookmarkedAmong(MirrorContentType.ILLUST, source.map { it.id })
+        ceui.pixiv.cache.IllustBookmarks.state.mirror(source.map { it.id }, mirrored, viewer)
         // 收藏态在这里按「池里可信值 → 镜像」只升不降地重算，关注态一律清成未知 —— 借号账号
         // 关注没关注这个作者，跟当前用户没有关系。出仓的 bean 已经不带别人的状态，合池时 null
         // 不会盖掉池里的值，详情页对 null 字段也会自己问镜像，所以**不**给池条目打不可信标记：
@@ -83,9 +85,11 @@ internal object ViewerBookmarkState {
      * 池里那条得先被确认是「当前用户视角」，否则自建源 / 借号 / 历史快照写进去的脏值会被当成
      * 权威值继续传播（见 [ObjectPool] 的「viewer 态可信度」）。
      */
-    private fun knownIllustBookmark(id: Long): Boolean? =
-        if (!ObjectPool.isIllustViewerStateTrusted(id)) null
-        else ObjectPool.get<Illust>(id).value?.is_bookmarked
+    private fun knownIllustBookmark(id: Long): Boolean? {
+        ceui.pixiv.cache.IllustBookmarks.state.state(id)?.let { return it.value }
+        return if (!ObjectPool.isIllustViewerStateTrusted(id)) null
+            else ObjectPool.get<Illust>(id).value?.is_bookmarked
+    }
 
     private fun knownNovelBookmark(id: Long): Boolean? =
         if (!ObjectPool.isViewerStateTrusted(id, ObjectSpec.KNovel)) null

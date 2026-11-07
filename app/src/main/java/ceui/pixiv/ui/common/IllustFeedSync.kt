@@ -220,12 +220,8 @@ class IllustFeedPoolSync(
                                 staged[id] = bean
                             }
                         }
-                        if (bookmarkOnlyBeans.isNotEmpty()) {
-                            if (bookmarkOnlyBeans.size == 1) {
-                                ObjectPool.update(bookmarkOnlyBeans.first())
-                            } else {
-                                ObjectPool.updateObjects(bookmarkOnlyBeans)
-                            }
+                        bookmarkOnlyBeans.forEach { bean ->
+                            ObjectPool.applyIllustBookmark(bean.id, bean.is_bookmarked)
                         }
                         if (freshBeans.isNotEmpty()) {
                             if (freshBeans.size == 1) {

@@ -90,6 +90,13 @@ class SearchIllustRepo @JvmOverloads constructor(
     @Volatile
     private var cacheMaxAgeMs = Nana7miSearchCache.MAX_AGE_FRESH_MS
 
+    private suspend fun viewerBookmarkRequest(fetch: suspend () -> ListIllust): ListIllust {
+        val stamp = ceui.pixiv.cache.IllustBookmarks.state.request()
+        return fetch().also { page ->
+            page.illusts = page.illusts.orEmpty().map { ceui.pixiv.cache.IllustBookmarks.state.response(it, stamp) }
+        }
+    }
+
     /** 首屏请求。挂起点全在网络 / 借号里，调用方不必再切 IO。 */
     suspend fun initApi(): ListIllust {
         // 每轮首屏使用全新会话。即使上一轮请求取消得较晚，它也只能更新旧会话，不能把
@@ -176,48 +183,52 @@ class SearchIllustRepo @JvmOverloads constructor(
         suspend fun popularPreviewRequest(): ListIllust = retryNana7miNetworkCall(
             stage = "popular_preview",
         ) {
-            api.popularPreviewLegacy(
-                assembledKeyword,
-                effectiveStartDate,
-                effectiveEndDate,
-                effectiveSearchTarget,
-                bookmarkMin,
-                bookmarkMax,
-                tool,
-                lang,
-                searchAiType,
-                ratioPattern,
-                contentType,
-                widthMin,
-                widthMax,
-                heightMin,
-                heightMax,
-                includePotentialViolationWorks,
-            )
+            viewerBookmarkRequest {
+                api.popularPreviewLegacy(
+                    assembledKeyword,
+                    effectiveStartDate,
+                    effectiveEndDate,
+                    effectiveSearchTarget,
+                    bookmarkMin,
+                    bookmarkMax,
+                    tool,
+                    lang,
+                    searchAiType,
+                    ratioPattern,
+                    contentType,
+                    widthMin,
+                    widthMax,
+                    heightMin,
+                    heightMax,
+                    includePotentialViolationWorks,
+                )
+            }
         }
 
         suspend fun plainSearchRequest(): ListIllust = retryNana7miNetworkCall(
             stage = "plain_search",
         ) {
-            api.searchIllust(
-                assembledKeyword,
-                sortType,
-                effectiveStartDate,
-                effectiveEndDate,
-                effectiveSearchTarget,
-                bookmarkMin,
-                bookmarkMax,
-                tool,
-                lang,
-                searchAiType,
-                ratioPattern,
-                contentType,
-                widthMin,
-                widthMax,
-                heightMin,
-                heightMax,
-                includePotentialViolationWorks,
-            )
+            viewerBookmarkRequest {
+                api.searchIllust(
+                    assembledKeyword,
+                    sortType,
+                    effectiveStartDate,
+                    effectiveEndDate,
+                    effectiveSearchTarget,
+                    bookmarkMin,
+                    bookmarkMax,
+                    tool,
+                    lang,
+                    searchAiType,
+                    ratioPattern,
+                    contentType,
+                    widthMin,
+                    widthMax,
+                    heightMin,
+                    heightMax,
+                    includePotentialViolationWorks,
+                )
+            }
         }
 
         suspend fun fallbackPreview(reason: String): ListIllust {
@@ -433,7 +444,7 @@ class SearchIllustRepo @JvmOverloads constructor(
         }
         if (payload == null && !cursorFromCache) {
             return telemetry.trackOrRun(Nana7miSearchTelemetry.Page.NEXT) {
-                api.getNextIllust(nextPageUrl)
+                viewerBookmarkRequest { api.getNextIllust(nextPageUrl) }
             }
         }
         // 会员专属游标：先问缓存（别人翻过的页直接拿），未命中再用借来的号打；首屏来自缓存

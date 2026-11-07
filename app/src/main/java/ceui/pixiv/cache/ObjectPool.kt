@@ -109,6 +109,13 @@ object ObjectPool {
         }
     }
 
+    /** State-only replay must not merge stale list metadata over a newer detail response. */
+    internal fun applyIllustBookmark(id: Long, value: Boolean?) {
+        val live = synchronized(lock) { store[ObjectKey(id, ObjectSpec.Illust)] } ?: return
+        val current = live.value as? Illust ?: return
+        if (current.is_bookmarked != value) dispatchValue(live, current.copy(is_bookmarked = value), isMainThread())
+    }
+
     fun updateIllust(illust: Illust) {
         update(illust)
         illust.user?.let { user ->
@@ -209,8 +216,22 @@ object ObjectPool {
         return updateObjectPool(obj, isFullVersion)
     }
 
+    private fun trustInitialBookmark(obj: ModelObject) {
+        if (obj is Illust && IllustBookmarks.state.state(obj.id)?.authoritative != true) {
+            obj.is_bookmarked?.let { IllustBookmarks.state.confirmed(obj.id, it) }
+        }
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun <T : ModelObject> bookmarkState(obj: T, full: Boolean): T {
+        if (obj !is Illust) return obj
+        if (full) obj.is_bookmarked?.let { IllustBookmarks.state.confirmed(obj.id, it) }
+        return IllustBookmarks.state.overlay(obj) as T
+    }
+
     /** 主线程调用（内部走 `setValue`，见类注释「线程」）。 */
-    fun <ObjectT : ModelObject> updateObjectPool(obj: ObjectT, isFullVersion: Boolean) {
+    fun <ObjectT : ModelObject> updateObjectPool(input: ObjectT, isFullVersion: Boolean) {
+        val obj = bookmarkState(input, isFullVersion)
         val key = ObjectKey(obj.objectUniqueId, obj.objectType)
         val storedObject: MutableLiveData<Any>
         val created: Boolean
@@ -236,7 +257,7 @@ object ObjectPool {
             } else {
                 mergeKeepingExisting(obj.javaClass, lastValue, obj)
             }
-            dispatchValue(storedObject, toSet, isMainThread())
+            dispatchValue(storedObject, if (toSet is Illust) IllustBookmarks.state.overlay(toSet) else toSet, isMainThread())
         }
         Timber.tag(TAG).d("对象池大小：%d", size)
     }
@@ -285,6 +306,7 @@ object ObjectPool {
         if (objects.isEmpty()) return
         if (objects.size == 1) {
             val single = objects.first()
+            if (isTrusted) trustInitialBookmark(single)
             updateObjectPool(single, isFullVersion = isFullVersion)
             if (isTrusted) {
                 markViewerStateTrusted(single.objectUniqueId, single.objectType)
@@ -293,7 +315,9 @@ object ObjectPool {
         }
         val toUpdateOutsideLock = ArrayList<Pair<MutableLiveData<Any>, ModelObject>>()
         synchronized(lock) {
-            for (obj in objects) {
+            for (input in objects) {
+                if (isTrusted) trustInitialBookmark(input)
+                val obj = bookmarkState(input, isFullVersion)
                 val key = ObjectKey(obj.objectUniqueId, obj.objectType)
                 if (isFullVersion) {
                     fullVersionKeys.add(key)
@@ -318,7 +342,7 @@ object ObjectPool {
             } else {
                 mergeKeepingExisting(obj.javaClass, lastValue, obj)
             }
-            dispatchValue(storedObject, toSet, isMain)
+            dispatchValue(storedObject, if (toSet is Illust) IllustBookmarks.state.overlay(toSet) else toSet, isMain)
         }
         Timber.tag(TAG).d(
             "批量事务合池完成：合入 %d 个条目，当前对象池大小：%d",
@@ -400,6 +424,7 @@ object ObjectPool {
      * 详情页的镜像校正抹回 null（镜像没就绪时就是「明明收藏了却一直灰心」）。
      */
     fun updateIllustTrusted(illust: Illust) {
+        trustInitialBookmark(illust)
         updateIllust(illust)
         markViewerStateTrusted(illust.id, ObjectSpec.Illust)
         // 作者条目跟着一起写了，同理：别让 seedUntrusted 早先留下的标记把这份关注态再交给镜像降级。
@@ -421,8 +446,10 @@ object ObjectPool {
         val current = illustLive.value as? Illust ?: return
         val author = current.user
         // 值没变就别发（LiveData 不看相等性，每次都全量通知观察者）。
+        IllustBookmarks.state.mirror(listOf(illustId), if (bookmarked == true) setOf(illustId) else emptySet(),
+            ceui.pixiv.session.SessionManager.loggedInUid)
         val nextIllust = current.copy(
-            is_bookmarked = bookmarked,
+            is_bookmarked = IllustBookmarks.state.state(illustId)?.value,
             user = author?.copy(is_followed = followed),
         )
         if (nextIllust != current) {

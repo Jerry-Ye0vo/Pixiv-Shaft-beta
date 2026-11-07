@@ -117,7 +117,15 @@ class ProfileManager @Inject constructor(@ApplicationContext app: Context) {
 
         // ====== 1. 读取本地数据源（只取最近的，够算画像就行）======
         // 每批 100 条，避免大 JSON 字段撑爆 CursorWindow (2MB)
-        val downloads = paginate(500) { limit, offset -> db.downloadDao().getAll(limit, offset) }
+        val downloads = mutableListOf<ceui.lisa.database.DownloadEntity>()
+        while (downloads.size < 500) {
+            val last = downloads.lastOrNull()
+            val limit = minOf(100, 500 - downloads.size)
+            val batch = if (last == null) db.downloadDao().getAll(limit, 0)
+                else db.downloadDao().getDownloadsAfter(last.downloadTime, last.fileName, limit)
+            if (batch.isEmpty()) break
+            downloads.addAll(batch)
+        }
         Timber.d("$TAG buildProfile downloads=${downloads.size}")
 
         val bookmarks = paginate(500) { limit, offset -> db.downloadDao().getFeatureList(limit, offset) }

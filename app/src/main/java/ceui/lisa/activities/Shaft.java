@@ -485,6 +485,7 @@ public class Shaft extends Application implements ServicesProvider {
         entityWrapper.initialize();
 
         SessionManager.INSTANCE.initialize();
+        ceui.pixiv.cache.IllustBookmarks.INSTANCE.initialize(this);
 
         // 批量下载持久化队列（v33）：冷启动恢复 + 单并发消费循环。
         //
@@ -505,7 +506,7 @@ public class Shaft extends Application implements ServicesProvider {
 
         // v38 illustId 索引列的一次性存量回填：把老下载记录的 illustId 补上，让
         // “这幅画下过没” 从 illustGson blob 全表 LIKE 扫描（2GB+ 卡）转成走索引。
-        // 后台跑、跑完置标志、幂等；跑完前 hasDownloadRecord 用旧 LIKE 兜底。
+        // 后台跑、跑完置标志、幂等；跑完前 hasDownloadRecord 分批解析未索引旧行兜底。
         ceui.lisa.database.DownloadIdBackfill.runIfNeeded(this);
 
         // v41 page 列的一次性存量回填（issue #953）：从老记录的 fileName 反解出页码，

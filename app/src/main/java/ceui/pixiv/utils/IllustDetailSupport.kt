@@ -63,6 +63,7 @@ suspend fun fetchFullIllustDetail(
     toUpdate: Boolean = true,
     onTransportError: ((Throwable) -> Unit)? = null,
 ): Illust? {
+    val bookmarkRequest = ceui.pixiv.cache.IllustBookmarks.state.request()
     val fresh = try {
         Client.appApi.getIllustByID(illustId).illust
     } catch (ce: CancellationException) {
@@ -72,7 +73,7 @@ suspend fun fetchFullIllustDetail(
         onTransportError?.invoke(e)
         return null
     }
-    val usable = if (fresh != null && fresh.id != 0L && fresh.visible == true) {
+    val received = if (fresh != null && fresh.id != 0L && fresh.visible == true) {
         fresh
     } else {
         // #592: app-api 应移动端商店政策把部分作品藏成 visible=false 的空壳(占位图
@@ -80,6 +81,7 @@ suspend fun fetchFullIllustDetail(
         // 同样 error,自然落回 null。
         fetchIllustViaWebApi(illustId) ?: return null
     }
+    val usable = if (toUpdate) ceui.pixiv.cache.IllustBookmarks.state.response(received, bookmarkRequest) else received
     if (toUpdate) {
         ObjectPool.update(usable, isFullVersion = true)
         usable.user?.let { ObjectPool.update(it) }
@@ -132,7 +134,9 @@ suspend fun fetchIllustViaWebApi(illustId: Long): Illust? {
  */
 fun fetchWebIllustFallbackAsync(illustId: Long, onResult: Callback<Illust?>) {
     MainScope().launch {
-        val bean = withContext(Dispatchers.IO) { fetchIllustViaWebApi(illustId) }
+        val bookmarkRequest = ceui.pixiv.cache.IllustBookmarks.state.request()
+        val received = withContext(Dispatchers.IO) { fetchIllustViaWebApi(illustId) }
+        val bean = received?.let { ceui.pixiv.cache.IllustBookmarks.state.response(it, bookmarkRequest) }
         if (bean != null) {
             ObjectPool.update(bean, isFullVersion = true)
             bean.user?.let { ObjectPool.update(it) }

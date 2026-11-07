@@ -540,6 +540,7 @@ object PixivActions {
         bookmark: Boolean,
         illust: Illust? = null,
     ) {
+        ceui.pixiv.cache.IllustBookmarks.state.local(illustId, bookmark)
         val pooled = ObjectPool.get<Illust>(illustId).value
         // 池里没有这条时拿调用方的 bean 兜底：收藏态马上会被这次动作覆盖，但嵌在里面的作者关注态
         // 还是列表快照的（自建源 / 借号来源可能是别人的），清成未知再进池 —— 下面会把这条标成可信，

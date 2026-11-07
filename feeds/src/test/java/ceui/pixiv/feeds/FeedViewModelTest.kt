@@ -74,6 +74,22 @@ class FeedViewModelTest {
     private val noThrottle = FeedPagingPolicy(maxAutoPages = Int.MAX_VALUE, minPageIntervalMs = 0)
 
     @Test
+    fun `append membership follows removal replacement and refresh`() = runTest(dispatcher) {
+        val vm = FeedViewModel(FakeSource(listOf(listOf(Row(1), Row(2)), listOf(Row(2), Row(3)))))
+        advanceUntilIdle()
+        vm.loadMore(); advanceUntilIdle()
+        vm.removeItems { it.feedKey == 2 }
+        vm.appendItems(listOf(Row(2), Row(2), Row(3)))
+        assertEquals(listOf(1, 3, 2), vm.uiState.value.items.map { it.feedKey })
+        vm.updateItems(Row::class.java) { if (it.id == 3) Row(4) else it }
+        vm.appendItems(listOf(Row(3), Row(4)))
+        assertEquals(listOf(1, 4, 2, 3), vm.uiState.value.items.map { it.feedKey })
+        vm.refresh(); advanceUntilIdle()
+        vm.appendItems(listOf(Row(3)))
+        assertEquals(listOf(1, 2, 3), vm.uiState.value.items.map { it.feedKey })
+    }
+
+    @Test
     fun `refresh loads first page`() = runTest(dispatcher) {
         val vm = FeedViewModel(FakeSource(listOf(listOf(Row(1), Row(2)), listOf(Row(3)))))
         advanceUntilIdle()

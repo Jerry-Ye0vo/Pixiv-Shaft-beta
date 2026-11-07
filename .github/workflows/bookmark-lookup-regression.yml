@@ -1,0 +1,75 @@
+name: Bookmark and download lookup regression
+on:
+  push:
+    branches: [fix/bookmark-state-and-download-lookup]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Test bookmark replay and legacy download lookups
+        run: |
+          bash ./gradlew :app:testGithubDebugUnitTest --console=plain --build-cache \
+            -PSHAFT_TEST_ABI=arm64-v8a -PSHAFT_BETA_TEST=true \
+            --tests ceui.pixiv.cache.BookmarkLedgerTest \
+            --tests ceui.pixiv.ui.common.IllustFeedBookmarkSyncTest \
+            --tests ceui.pixiv.ui.dynamic.FollowingBookmarkFilterTest \
+            --tests ceui.lisa.helper.DeduplicateArrayListTest \
+            --tests ceui.lisa.database.DownloadLookupTest \
+            --tests ceui.pixiv.cache.ViewerStateSelfHealTest \
+            --tests ceui.lisa.core.PageQueueCompatibilityTest \
+            --tests ceui.pixiv.download.DownloadedPageIndexTest \
+            --tests ceui.pixiv.feeds.pixiv.PixivFeedSourceCacheTest \
+            --tests ceui.pixiv.ui.account.AccountDataPurgeTest
+          bash ./gradlew :feeds:testDebugUnitTest --console=plain --build-cache \
+            --tests ceui.pixiv.feeds.FeedViewModelTest
+      - name: Summarize regression results
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          rows = []
+          paths = sorted(Path('app/build/test-results').rglob('TEST-*.xml')) + sorted(Path('feeds/build/test-results').rglob('TEST-*.xml'))
+          for path in paths:
+              root = ET.parse(path).getroot()
+              for case in root.findall('testcase'):
+                  for problem in list(case.findall('failure')) + list(case.findall('error')):
+                      print(f"FAILED {root.attrib.get('name')} :: {case.attrib.get('name')}")
+                      print((problem.text or problem.attrib.get('message', ''))[:16000])
+              rows.append((root.attrib.get('name', path.stem), *(int(root.attrib.get(k, 0)) for k in ('tests', 'failures', 'errors', 'skipped'))))
+          totals = [sum(row[i] for row in rows) for i in range(1, 5)]
+          report = ['| Suite | Tests | Failures | Errors | Skipped |', '| --- | ---: | ---: | ---: | ---: |']
+          report += ['| ' + ' | '.join(map(str, row)) + ' |' for row in rows]
+          report += ['| TOTAL | ' + ' | '.join(map(str, totals)) + ' |']
+          print('\n'.join(report) if rows else 'No JUnit reports produced; inspect the Gradle step.')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('\n'.join(report) if rows else 'No JUnit reports produced.\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bookmark-lookup-regression
+          path: |
+            app/build/reports/tests/
+            app/build/test-results/
+            feeds/build/reports/tests/
+            feeds/build/test-results/
+          if-no-files-found: ignore
+

@@ -31,6 +31,7 @@ import timber.log.Timber;
         entities = {
                 IllustHistoryEntity.class, //浏览历史
                 DownloadEntity.class, //下载历史
+                ceui.pixiv.db.BookmarkKnowledgeEntity.class, // 当前账号已确认的收藏状态
                 UserEntity.class, //多用户保存信息
                 SearchEntity.class, //搜索历史
                 ImageEntity.class, //用不到
@@ -61,7 +62,9 @@ import timber.log.Timber;
 )
 public abstract class AppDatabase extends RoomDatabase {
 
-    public static final int VERSION = 45;
+    public abstract ceui.pixiv.db.BookmarkKnowledgeDao bookmarkKnowledgeDao();
+
+    public static final int VERSION = 46;
     public static final String DATABASE_NAME = "roomDemo-database";
 
     /** 迁移/开库相关日志的 tag。升级出问题时 `adb logcat -s AppDatabase` 一把抓。 */
@@ -622,6 +625,14 @@ public abstract class AppDatabase extends RoomDatabase {
         }
     };
 
+    private static final Migration MIGRATION_45_46 = new Migration(45, 46) {
+        @Override public void migrate(@NonNull SupportSQLiteDatabase database) {
+            database.execSQL("CREATE TABLE IF NOT EXISTS bookmark_knowledge (ownerUid INTEGER NOT NULL, illustId INTEGER NOT NULL, bookmarked INTEGER NOT NULL, PRIMARY KEY(ownerUid, illustId))");
+            database.execSQL("CREATE INDEX IF NOT EXISTS index_illust_download_table_illustId_page_downloadTime ON illust_download_table(illustId, page, downloadTime DESC)");
+            database.execSQL("CREATE INDEX IF NOT EXISTS index_illust_download_table_downloadTime_fileName ON illust_download_table(downloadTime, fileName)");
+        }
+    };
+
     private static final Migration[] ALL_MIGRATIONS = {
             MIGRATION_23_24,
             MIGRATION_24_25,
@@ -645,6 +656,7 @@ public abstract class AppDatabase extends RoomDatabase {
             MIGRATION_42_43,
             MIGRATION_43_44,
             MIGRATION_44_45,
+            MIGRATION_45_46,
     };
 
     /**
