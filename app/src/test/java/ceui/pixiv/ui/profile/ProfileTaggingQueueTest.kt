@@ -91,4 +91,28 @@ class ProfileTaggingQueueTest {
         assertEquals(2,after.scanned); assertEquals(2,after.inferred)
         assertEquals(2,db.profileAnalyticsDao().tagBatch(LocalTaggerModel.VERSION,0,100).size)
     }
+
+    @Test fun pauseDuringFirstInferenceAlreadyKeepsTheOriginalLibraryBoundary() = runBlocking {
+        add("first.jpg","first"); add("second.jpg","second")
+        val entered = CompletableDeferred<Unit>()
+        prediction = { entered.complete(Unit); awaitCancellation() }
+        val ticket = worker.start()
+        withTimeout(8000) { entered.await() }
+        assertTrue(ticket.pause())
+        withTimeout(8000) { ticket.status.first { it.state == State.PAUSED } }
+        val initial = worker.progress(ticket)!!
+        assertTrue(initial.initialized); assertEquals(0,initial.scanned)
+        val originalCeiling = initial.ceiling
+        queue.shutdown()
+        add("new.jpg","added while paused before the first completed image")
+        assertTrue(db.profileAnalyticsDao().downloadCeiling() > originalCeiling)
+        prediction = { listOf(PredictedImageTag("dress",.9f,0)) }
+        createQueue(); queue.ready.await(); eventually { worker.current() != null }
+        val restored = worker.current()!!; worker.resume(restored.id)
+        assertEquals(State.SUCCEEDED,withTimeout(8000) { restored.status.first { it.state in setOf(State.SUCCEEDED,State.FAILED) } }.state)
+        assertEquals(originalCeiling,worker.progress(restored)!!.ceiling)
+        assertEquals(2,worker.progress(restored)!!.scanned)
+        assertEquals(2,db.profileAnalyticsDao().tagBatch(LocalTaggerModel.VERSION,0,100).size)
+    }
+
 }

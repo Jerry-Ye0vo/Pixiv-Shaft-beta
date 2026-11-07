@@ -49,12 +49,13 @@ internal class QueuedProfileTagging internal constructor(
         val request = gson.fromJson(context.plan.request, ProfileTagRequest::class.java)
         require(request.version == 1)
         val dao = database().profileAnalyticsDao()
-        var saved = runCatching { gson.fromJson(context.checkpoint, ProfileTagProgress::class.java) }.getOrNull()
+        val restored = runCatching { gson.fromJson(context.checkpoint, ProfileTagProgress::class.java) }.getOrNull()
             ?.takeIf { it.version == 1 && it.initialized }
-            ?: ProfileTagProgress(ceiling = dao.downloadCeiling(), initialized = true)
+        var saved = restored ?: ProfileTagProgress(ceiling = dao.downloadCeiling(), initialized = true)
+        // Freeze the library before the first image, including a pause during model loading/inference.
+        if (restored == null) context.checkpoint(gson.toJson(saved))
         val total = dao.downloadCount(saved.ceiling)
         var checkpointTime = SystemClock.elapsedRealtime()
-        var processedHere = false
         var tagger: ProfileTagger? = null
         try {
             while (true) {
@@ -103,13 +104,12 @@ internal class QueuedProfileTagging internal constructor(
                         inferred = saved.inferred + inferred, reused = saved.reused + reused,
                         skipped = saved.skipped + skipped, failed = saved.failed + failed,
                         elapsedMs = saved.elapsedMs + now - checkpointTime)
-                    checkpointTime = now; processedHere = true
+                    checkpointTime = now
                     // One completed-file checkpoint; interrupted inference is retried, committed tags are reusable.
                     context.checkpoint(gson.toJson(saved))
                     context.progress("profile-tagging", saved.scanned.toLong(), total.toLong())
                 }
             }
-            if (!processedHere) context.checkpoint(gson.toJson(saved))
             context.commit {}
         } finally { tagger?.close() }
     }
