@@ -2,7 +2,7 @@ name: Publish Beta
 
 on:
   push:
-    branches: [fix/bookmark-state-and-download-lookup]
+    branches: [feat/local-profile-statistics]
   workflow_dispatch:
 
 permissions:
@@ -19,9 +19,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
-      BETA_REVISION: '16'
-      BETA_REGRESSION_WORKFLOW: '.github/workflows/bookmark-lookup-regression.yml'
-      BETA_REGRESSION_ARTIFACT: 'bookmark-lookup-regression'
+      BETA_REVISION: '17'
+      BETA_REGRESSION_WORKFLOW: '.github/workflows/profile-regression.yml'
+      BETA_REGRESSION_ARTIFACT: 'profile-regression'
     steps:
       - uses: actions/checkout@v4
         with:

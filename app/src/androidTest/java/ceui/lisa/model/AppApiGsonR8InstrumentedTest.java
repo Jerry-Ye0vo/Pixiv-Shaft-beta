@@ -58,6 +58,24 @@ import retrofit2.http.GET;
 public final class AppApiGsonR8InstrumentedTest {
 
     @Test
+    public void localProfileAndPinnedModelRequestsKeepTheirReleaseJsonContract() throws Exception {
+        Object request = parseWire(ceui.pixiv.download.model.ModelRequest.class,
+                "{\"version\":1,\"directory\":\"image-tagger-models\",\"asset\":\"wd\",\"required\":[\"model.onnx\"],\"operation\":\"download\",\"source\":\"https://example.com/model\",\"timeoutSeconds\":180,\"rawFile\":\"model.onnx\",\"expectedSha256\":\"pinned\"}");
+        JSONObject encoded = new JSONObject(encodeWire(request));
+        assertEquals("model.onnx", encoded.getString("rawFile"));
+        assertEquals("pinned", encoded.getString("expectedSha256"));
+        Object checkpoint = parseWire(ceui.pixiv.ui.profile.ProfileTagProgress.class,
+                "{\"version\":1,\"after\":42,\"ceiling\":100,\"scanned\":2,\"inferred\":1,\"reused\":1,\"skipped\":0,\"failed\":0,\"elapsedMs\":1000,\"initialized\":true}");
+        encoded = new JSONObject(encodeWire(checkpoint));
+        assertTrue(encoded.getBoolean("initialized"));
+        assertEquals(42, encoded.getLong("after"));
+        Object snapshot = parseWire(ceui.pixiv.ui.profile.ProfileStatistics.class,
+                "{\"ownerUid\":1,\"builtAt\":100,\"downloadRecords\":2,\"unidentifiedRecords\":0,\"overlap\":1,\"all\":{\"works\":1,\"taggedWorks\":1,\"tags\":[{\"key\":\"dress\",\"name\":\"Dress\",\"count\":1}],\"authors\":[],\"types\":{\"illust\":1}},\"downloads\":{},\"bookmarks\":{},\"days\":[],\"completedShelves\":2,\"totalShelves\":4}");
+        encoded = new JSONObject(encodeWire(snapshot));
+        assertEquals("dress", encoded.getJSONObject("all").getJSONArray("tags").getJSONObject(0).getString("key"));
+    }
+
+    @Test
     public void localOutputIntentKeepsItsFrozenTextSourceAndDestinationInRelease() throws Exception {
         Object request = parseWire(ceui.pixiv.download.copy.LocalOutputRequest.class,
                 "{\"version\":1,\"type\":\"caption\",\"subjectId\":123,\"destination\":{\"storage\":\"cache\",\"segments\":[\"frozen.txt\"],\"mime\":\"text/plain\",\"policy\":\"Rename\"},\"contextJson\":\"{}\",\"content\":\"frozen text\",\"sourceBytes\":42,\"sourceModified\":12345,\"producer\":\"preparation-token\",\"asVideo\":false}");

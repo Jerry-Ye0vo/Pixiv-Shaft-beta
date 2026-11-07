@@ -555,6 +555,7 @@ public class Shaft extends Application implements ServicesProvider {
         // Typed local outputs retain their immutable inputs and receipts across process restart.
         ceui.pixiv.download.copy.QueuedCopies.get(this);
         ceui.pixiv.download.model.QueuedModels.get(this);
+        ceui.pixiv.ui.profile.QueuedProfileTagging.get(this);
         ceui.pixiv.ui.novel.reader.export.QueuedNovelExports.get(this);
         ceui.pixiv.ui.novel.reader.export.QueuedNovelGroups.get(this);
         ceui.pixiv.download.copy.QueuedImageDerivatives.get(this);

@@ -91,6 +91,25 @@ class AppDatabaseMigrationTest {
         }
     }
 
+    @Test
+    fun migrateBeta16RetainsRecordsAndAddsOnlyTheDerivedImageTagCache() {
+        val name = "beta16-profile-migration.db"
+        helper.createDatabase(name, 46).use { db ->
+            db.execSQL("INSERT INTO illust_download_table(fileName,filePath,illustGson,downloadTime,illustId,page) VALUES('old.png','content://old/42','{\"id\":42}',100,42,2)")
+            db.execSQL("INSERT INTO bookmark_knowledge VALUES(1,42,1)")
+        }
+        helper.runMigrationsAndValidate(name, AppDatabase.VERSION, true, *AppDatabase.migrations()).use { db ->
+            db.query("SELECT filePath,page FROM illust_download_table WHERE illustId=42").use {
+                assertTrue(it.moveToFirst()); assertEquals("content://old/42", it.getString(0)); assertEquals(2,it.getInt(1))
+            }
+            db.query("SELECT bookmarked FROM bookmark_knowledge WHERE ownerUid=1 AND illustId=42").use {
+                assertTrue(it.moveToFirst()); assertEquals(1,it.getInt(0))
+            }
+            db.execSQL("INSERT INTO local_image_tags VALUES('content://old/42','test-model','stamp','sha','[]',10,100)")
+            assertTrue(hasIndex(db,"local_image_tags","index_local_image_tags_sha256_modelVersion"))
+        }
+    }
+
     private fun hasIndex(db: SupportSQLiteDatabase, table: String, index: String): Boolean =
         db.query("PRAGMA index_list('$table')").use { cursor ->
             val nameColumn = cursor.getColumnIndexOrThrow("name")

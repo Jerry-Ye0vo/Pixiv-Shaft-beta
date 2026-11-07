@@ -89,6 +89,7 @@ class TemplateRouteTest {
             "USER_MANGA" to "漫画作品",
             "ILLUST_BOOKMARKS" to "插画/漫画收藏",
             "DOWNLOAD_MANAGER" to "下载管理",
+            "LOCAL_PROFILE" to "本地用户画像",
             "RECOMMENDED_MANGA" to "推荐漫画",
             "RECOMMENDED_NOVELS" to "推荐小说",
             "NOVEL_BOOKMARKS" to "小说收藏",

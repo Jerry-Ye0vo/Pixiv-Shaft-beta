@@ -37,6 +37,8 @@ internal class ContentTaskAdapter(private val action: (ContentTaskRow) -> Unit,
         view.findViewById<TextView>(R.id.sizeText).apply {
             isSingleLine = false; maxLines = 3
             text = row.error ?: if (row.needsFormat) context.getString(R.string.content_task_choose_format) else when {
+                row.itemProgress && row.total > 0 -> context.getString(R.string.profile_task_items, row.bytes, row.total)
+                row.itemProgress -> context.getString(R.string.profile_task_running)
                 row.total > 0 -> "${row.bytes / 1024} / ${row.total / 1024} KB"
                 row.phase.startsWith("series:") -> row.phase.replace("series:", "系列 ").replace(":chapter:", " · 章节 ").replace(":page:", " · 列表 ")
                 row.running -> context.getString(R.string.content_task_processing)
