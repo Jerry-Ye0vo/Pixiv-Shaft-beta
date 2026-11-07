@@ -53,9 +53,11 @@ suspend fun reconcileViewerStateFromMirror(
     writeBack: Boolean = true,
     mirrorLookup: suspend (MirrorContentType, List<Long>) -> Set<Long> = ::defaultMirrorLookup,
 ): Illust {
+    val bookmarkKnowledge = ceui.pixiv.cache.IllustBookmarks.state.state(illust.id)
     val trusted = ObjectPool.isIllustViewerStateTrusted(illust.id)
     val authorId = illust.user?.id ?: 0L
-    val needBookmark = !(trusted && illust.is_bookmarked != null)
+    val needBookmark = bookmarkKnowledge?.let { !it.authoritative }
+        ?: !(trusted && illust.is_bookmarked != null)
     // 关注态的归属是作者条目，不是这张作品：作者条目自己可信（画师主页 / 关注动作 / 官方列表
     // 写进来的）时以它为准。只看作品的可信度会让一张自建源卡片把别处确认过的「已关注」，
     // 在镜像没就绪时降级成未知（写回池后作者栏、画师主页一起变灰）。
@@ -67,12 +69,16 @@ suspend fun reconcileViewerStateFromMirror(
         else -> null
     }
     val needFollow = authorId > 0L && knownFollowed == null
-    if (!needBookmark && !needFollow) return illust
+    if (!needBookmark && !needFollow) {
+        val known = ceui.pixiv.cache.IllustBookmarks.state.overlay(illust)
+        if (writeBack && known !== illust) ObjectPool.applyIllustBookmark(illust.id, known.is_bookmarked)
+        return known
+    }
 
     val bookmarkedState = if (needBookmark) {
         true.takeIf { illust.id in mirrorLookup(MirrorContentType.ILLUST, listOf(illust.id)) }
     } else {
-        illust.is_bookmarked
+        bookmarkKnowledge?.takeIf { it.authoritative }?.value ?: illust.is_bookmarked
     }
     val followedState = if (needFollow) {
         true.takeIf { authorId in mirrorLookup(MirrorContentType.USER, listOf(authorId)) }

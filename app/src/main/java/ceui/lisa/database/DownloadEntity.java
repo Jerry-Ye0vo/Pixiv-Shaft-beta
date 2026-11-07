@@ -16,7 +16,9 @@ import java.io.Serializable;
  * 实测 1.02GB / 5.3 万行：无索引 2636 ms，建索引后 6 ms。
  */
 @Entity(tableName = "illust_download_table",
-        indices = {@Index("illustId"), @Index({"illustId", "page"}), @Index("downloadTime")})
+        indices = {@Index("illustId"), @Index({"illustId", "page"}), @Index("downloadTime"),
+                @Index(value = {"illustId", "page", "downloadTime"}, orders = {Index.Order.ASC, Index.Order.ASC, Index.Order.DESC}),
+                @Index({"downloadTime", "fileName"})})
 public final class DownloadEntity implements Serializable {
 
     @PrimaryKey()

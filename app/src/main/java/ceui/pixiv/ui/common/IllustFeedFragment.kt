@@ -188,6 +188,16 @@ abstract class IllustFeedFragment(
         ).bind(requireContext(), viewLifecycleOwner)
         IllustFeedPoolSync(syncViewModel, ::poolableBeansOf)
             .bind(viewLifecycleOwner, feedViewModel.uiState)
+        IllustFeedBookmarkSync.create(requireContext(), feedViewModel).bind(
+            viewLifecycleOwner, feedBinding.feedListView,
+        ) {
+            val adapter = feedAdapter
+            val list = feedBinding.feedListView
+            (0 until list.childCount).mapNotNull { child ->
+                val position = list.getChildAdapterPosition(list.getChildAt(child))
+                (adapter?.currentList?.getOrNull(position) as? IllustFeedItem)?.illust?.id
+            }
+        }
         observeMuteRevision()
         observeSnapshotRevision()
     }

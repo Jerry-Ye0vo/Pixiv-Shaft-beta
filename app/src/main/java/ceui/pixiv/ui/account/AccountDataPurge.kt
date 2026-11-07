@@ -90,6 +90,10 @@ object AccountDataPurge {
             // 4. 凭证行**永远**删。这一步之后账号在界面上就不存在了，放最后保证前面任何一步失败
             //    都不会留下「账号没了、数据还在」；不兜异常，失败要让调用方知道账号其实没删掉。
             db.downloadDao().deleteUser(UserEntity().apply { userID = targetUid })
+            if (purgeLocalData) {
+                ceui.pixiv.cache.IllustBookmarks.state.forget(targetUid)
+                db.bookmarkKnowledgeDao().deleteOwner(targetUid)
+            }
             Timber.tag(TAG).i(
                 "已从本地移除账号 %d（一并清理关联数据=%b）", targetUid, purgeLocalData
             )

@@ -103,7 +103,7 @@ object DownloadedPageIndex {
             }
             if (fileNames.isNotEmpty()) {
                 // 单次 IN 查询取代 N 次 Room 调用。Pixiv 多 P 上限远低于 SQLite 变量上限。
-                for (row in dao.getDownloadsByFileNames(fileNames)) {
+                for (row in dao.getDownloadedPathsByFileNames(fileNames)) {
                     val page = pageByFileName[row.fileName] ?: continue
                     if (page in skip || found.containsKey(page)) continue
                     val path = row.filePath

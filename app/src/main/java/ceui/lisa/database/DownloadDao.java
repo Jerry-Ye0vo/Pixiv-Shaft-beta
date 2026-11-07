@@ -105,8 +105,22 @@ public abstract class DownloadDao {
      * @param offset
      * @return
      */
-    @Query("SELECT * FROM illust_download_table ORDER BY downloadTime DESC LIMIT :limit OFFSET :offset")
+    @Query("SELECT * FROM illust_download_table ORDER BY downloadTime DESC, fileName DESC LIMIT :limit OFFSET :offset")
     public abstract List<DownloadEntity> getAll(int limit, int offset);
+
+    @Query("SELECT * FROM illust_download_table WHERE downloadTime=:time AND fileName<:fileName ORDER BY downloadTime DESC, fileName DESC LIMIT :limit")
+    public abstract List<DownloadEntity> getDownloadsAtTimeBefore(long time, String fileName, int limit);
+
+    @Query("SELECT * FROM illust_download_table WHERE downloadTime<:time ORDER BY downloadTime DESC, fileName DESC LIMIT :limit")
+    public abstract List<DownloadEntity> getDownloadsOlderThan(long time, int limit);
+
+    /** Two indexed ranges also work on API 24 SQLite, which predates row-value comparisons. */
+    @androidx.room.Transaction
+    public List<DownloadEntity> getDownloadsAfter(long time, String fileName, int limit) {
+        List<DownloadEntity> rows = new java.util.ArrayList<>(getDownloadsAtTimeBefore(time, fileName, limit));
+        if (rows.size() < limit) rows.addAll(getDownloadsOlderThan(time, limit - rows.size()));
+        return rows;
+    }
 
     /**
      * 前 [limit] 行能折成多少张卡片 —— 已完成 tab 标题上的数字，分组键与
@@ -118,7 +132,7 @@ public abstract class DownloadDao {
             "WHEN illustId > 0 THEN 'i:' || illustId " +
             "ELSE 'a:' || fileName END) " +
             "FROM (SELECT fileName, illustId FROM illust_download_table " +
-            "ORDER BY downloadTime DESC LIMIT :limit)")
+            "ORDER BY downloadTime DESC, fileName DESC LIMIT :limit)")
     public abstract int countDoneCardsInWindow(String novelKey, int limit);
 
     /**
@@ -129,7 +143,7 @@ public abstract class DownloadDao {
     @Query("SELECT * FROM illust_download_table WHERE " +
             "fileName LIKE '%' || :keyword || '%' OR " +
             "illustGson LIKE '%' || :keyword || '%' " +
-            "ORDER BY downloadTime DESC LIMIT 600")
+            "ORDER BY downloadTime DESC, fileName DESC LIMIT 600")
     public abstract List<DownloadEntity> searchDownloads(String keyword);
 
     /**
@@ -137,25 +151,38 @@ public abstract class DownloadDao {
      * 变更时自动 emit 新快照。已完成 tab 用这个替代 1.5s 轮询 + DOWNLOAD_FINISH
      * 广播兜底 —— Manager 写 DownloadEntity 时 Room 自己就会通知 collector。
      */
-    @Query("SELECT * FROM illust_download_table ORDER BY downloadTime DESC LIMIT :limit")
+    @Query("SELECT * FROM illust_download_table ORDER BY downloadTime DESC, fileName DESC LIMIT :limit")
     public abstract Flow<List<DownloadEntity>> flowAll(int limit);
 
     /**
-     * 判断是否存在指定插画 id 的下载记录（通过 illustGson 中的 "id":xxx 片段匹配）。
-     * 兼容 id 作为最后一个字段（以 `}` 结尾）和非末尾字段（以 `,` 结尾）两种 Gson 序列化顺序。
+     * 回填窗口内只扫描 illustId=0 的旧行，解析 JSON 顶层 ID，避免嵌套作者 ID 误命中。
+     * 分批读取并在首个匹配处停止；小说记录不作为插画下载证据。
      */
-    @Query("SELECT COUNT(*) > 0 FROM illust_download_table WHERE " +
-            "illustGson LIKE '%\"id\":' || :illustId || ',%' OR " +
-            "illustGson LIKE '%\"id\":' || :illustId || '}%'")
-    public abstract boolean hasDownloadRecordByIllustId(long illustId);
+    public boolean hasDownloadRecordByIllustId(long illustId) {
+        long after = 0;
+        while (true) {
+            int count = 0;
+            try (Cursor rows = unindexedDownloadIdsAfter(after, 64)) {
+                while (rows.moveToNext()) {
+                    after = rows.getLong(0);
+                    count++;
+                    if (!rows.getString(1).contains(ceui.lisa.utils.Params.NOVEL_KEY)
+                            && DownloadIdExtractor.extractIllustId(rows.getString(2)) == illustId) return true;
+                }
+            }
+            if (count < 64) return false;
+        }
+    }
+
+    @NonNull
+    @Query("SELECT rowid, fileName, illustGson FROM illust_download_table WHERE illustId=0 AND rowid>:after ORDER BY rowid LIMIT :limit")
+    public abstract Cursor unindexedDownloadIdsAfter(long after, int limit);
 
     /**
-     * illustId 走索引的 O(log n) 版本，取代 {@link #hasDownloadRecordByIllustId} 对 illustGson
-     * blob 的全表 LIKE 扫描（2GB+ 库单次几百 ms~秒级、还烧 CPU 占读连接 → 详情/头像页发涩）。
-     * v38 起 illust_download_table 有 illustId 索引列（插入即算、存量后台回填）。回填未完成
-     * 期间仍需 LIKE 版兜底，统一入口见 {@code DownloadStateProbeKt.hasDownloadRecord}。
+     * 索引存在性查询，找到首条插画记录即停止。v38 起新行写入 illustId，存量后台回填。
+     * 统一入口 {@code DownloadStateProbeKt.hasDownloadRecord} 在回填窗口内补查未索引旧行。
      */
-    @Query("SELECT COUNT(*) > 0 FROM illust_download_table WHERE illustId = :illustId")
+    @Query("SELECT EXISTS(SELECT 1 FROM illust_download_table WHERE illustId = :illustId AND instr(fileName, '" + ceui.lisa.utils.Params.NOVEL_KEY + "')=0 LIMIT 1)")
     public abstract boolean hasDownloadRecordByIllustIdIndexed(long illustId);
 
     // ---- v38 illustId 索引列的存量回填（DownloadIdBackfill 用）----
@@ -187,6 +214,9 @@ public abstract class DownloadDao {
     @Query("SELECT * FROM illust_download_table WHERE fileName IN (:fileNames)")
     public abstract List<DownloadEntity> getDownloadsByFileNames(List<String> fileNames);
 
+    @Query("SELECT fileName, filePath, page FROM illust_download_table WHERE fileName IN (:fileNames)")
+    public abstract List<DownloadedPage> getDownloadedPathsByFileNames(List<String> fileNames);
+
     /**
      * 按 (作品, 页码) 取这个作品已下载的页。v41 的 {@code (illustId, page)} 复合索引，O(log n)。
      *
@@ -200,7 +230,7 @@ public abstract class DownloadDao {
      * {@code IllustAdapter} 调这里。理由详见 {@link DownloadedPage}。
      */
     @Query("SELECT fileName, filePath, page FROM illust_download_table " +
-            "WHERE illustId = :illustId AND page >= 0 ORDER BY downloadTime DESC")
+            "WHERE illustId = :illustId AND page >= 0 ORDER BY page ASC, downloadTime DESC")
     public abstract List<DownloadedPage> getDownloadedPages(long illustId);
 
     /**
@@ -219,7 +249,7 @@ public abstract class DownloadDao {
      */
     @Query("SELECT fileName, filePath, page FROM illust_download_table " +
             "WHERE illustId = :illustId AND page >= 0 AND downloadTime >= :since " +
-            "ORDER BY downloadTime DESC")
+            "ORDER BY page ASC, downloadTime DESC")
     public abstract List<DownloadedPage> getDownloadedPagesSince(long illustId, long since);
 
     // ---- v41 page 列的存量回填（DownloadPageBackfill 用）----

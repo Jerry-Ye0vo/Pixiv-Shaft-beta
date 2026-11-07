@@ -88,12 +88,16 @@ object RenameSweeper {
         var nameConflicts = 0
         var broken = 0
         var ugoiraCacheZips = 0
-        var offset = 0
+        var scanned = 0
+        var cursor: ceui.lisa.database.DownloadEntity? = null
         while (true) {
             coroutineContext.ensureActive()
-            val batch = dao.getAll(PAGE_SIZE, offset)
+            val before = cursor
+            val batch = if (before == null) dao.getAll(PAGE_SIZE, 0)
+                else dao.getDownloadsAfter(before.downloadTime, before.fileName, PAGE_SIZE)
             if (batch.isEmpty()) break
-            offset += batch.size
+            cursor = batch.last()
+            scanned += batch.size
             for (row in batch) {
                 val gson = row.illustGson
                 if (gson.isNullOrEmpty()) {
@@ -160,10 +164,10 @@ object RenameSweeper {
                 }
                 entries += Entry(row.fileName, newName, row.filePath)
             }
-            onProgress(offset, entries.size)
+            onProgress(scanned, entries.size)
         }
         RenamePlan(
-            totalRows = offset,
+            totalRows = scanned,
             entries = entries,
             alreadyMatching = alreadyMatching,
             fileMissing = fileMissing,

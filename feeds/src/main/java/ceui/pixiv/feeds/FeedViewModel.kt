@@ -47,6 +47,19 @@ class FeedViewModel<Cursor : Any>(
     private var appendJob: Job? = null
     private var notifiedRefreshError: LoadState.Error? = null
 
+    private var indexedItems: List<FeedItem>? = null
+    private val itemIdentities = HashSet<Any>()
+
+    /** Rebuild only after a replacement/structural edit, not on every appended page. */
+    private fun newIdentities(existing: List<FeedItem>, incoming: List<FeedItem>): List<FeedItem> {
+        if (indexedItems !== existing) {
+            itemIdentities.clear()
+            existing.mapTo(itemIdentities) { it.identity }
+            indexedItems = existing
+        }
+        return incoming.filter { itemIdentities.add(it.identity) }
+    }
+
     /**
      * 上一次 [loadMore] 网络页返回的时刻（[clock] 毫秒），null = 本代还没翻过页。
      * 下一页至少要等到它加 [FeedPagingPolicy.minPageIntervalMs]；离它超过
@@ -268,13 +281,15 @@ class FeedViewModel<Cursor : Any>(
                     pagesInBudget++
                     nextCursor = page.nextCursor
                     // VM 的全部状态变更都在主线程串行发生，先读快照再算增量是安全的
-                    val seen = _uiState.value.items.mapTo(HashSet()) { it.identity }
-                    val fresh = page.items.filter { seen.add(it.identity) }
+                    val existing = _uiState.value.items
+                    val fresh = newIdentities(existing, page.items)
+                    val appended = if (fresh.isEmpty()) existing else existing + fresh
+                    indexedItems = appended
                     _uiState.update { state ->
                         state.copy(
                             // 零新条目时保持列表实例不变：等价新列表会白白触发一轮全量 diff
                             // 和下游按 identity 跳过的扫描（如 ObjectPool 合池）
-                            items = if (fresh.isEmpty()) state.items else state.items + fresh,
+                            items = appended,
                             reachedEnd = page.nextCursor == null,
                         )
                     }
@@ -450,9 +465,8 @@ class FeedViewModel<Cursor : Any>(
     fun appendItems(newItems: List<FeedItem>) {
         if (newItems.isEmpty()) return
         mutateItems(structural = false) { existing ->
-            val seen = existing.mapTo(HashSet()) { it.identity }
-            val fresh = newItems.filter { seen.add(it.identity) }
-            if (fresh.isEmpty()) existing else existing + fresh
+            val fresh = newIdentities(existing, newItems)
+            (if (fresh.isEmpty()) existing else existing + fresh).also { indexedItems = it }
         }
     }
 

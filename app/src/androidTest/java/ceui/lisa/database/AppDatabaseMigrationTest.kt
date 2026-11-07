@@ -72,6 +72,25 @@ class AppDatabaseMigrationTest {
         db.close()
     }
 
+    @Test
+    fun migrateBeta15PreservesOldDownloadsAndCreatesBookmarkKnowledge() {
+        val name = "beta15-to-beta16-migration.db"
+        helper.createDatabase(name, 45).use { db ->
+            db.execSQL("INSERT INTO illust_download_table(fileName,filePath,illustGson,downloadTime,illustId,page) VALUES('old.jpg','content://old/42','{\"id\":42}',100,42,2)")
+        }
+        helper.runMigrationsAndValidate(name, AppDatabase.VERSION, true, *AppDatabase.migrations()).use { db ->
+            db.query("SELECT filePath,page FROM illust_download_table WHERE fileName='old.jpg'").use {
+                assertTrue(it.moveToFirst()); assertEquals("content://old/42", it.getString(0)); assertEquals(2, it.getInt(1))
+            }
+            assertTrue(hasIndex(db, "illust_download_table", "index_illust_download_table_illustId_page_downloadTime"))
+            assertTrue(hasIndex(db, "illust_download_table", "index_illust_download_table_downloadTime_fileName"))
+            db.execSQL("INSERT INTO bookmark_knowledge VALUES(1,42,1)")
+            db.query("SELECT bookmarked FROM bookmark_knowledge WHERE ownerUid=1 AND illustId=42").use {
+                assertTrue(it.moveToFirst()); assertEquals(1, it.getInt(0))
+            }
+        }
+    }
+
     private fun hasIndex(db: SupportSQLiteDatabase, table: String, index: String): Boolean =
         db.query("PRAGMA index_list('$table')").use { cursor ->
             val nameColumn = cursor.getColumnIndexOrThrow("name")

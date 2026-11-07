@@ -78,11 +78,23 @@ class PixivFeedSource<Resp : KListShow<*>>(
 
     override suspend fun load(cursor: String?): FeedPage<String> {
         val phase = if (cursor == null) FeedLoadPhase.FirstPage else FeedLoadPhase.NextPage
-        val response: Resp = if (cursor == null) {
+        val bookmarkRequest = ceui.pixiv.cache.IllustBookmarks.state.request()
+        val received: Resp = if (cursor == null) {
             initialFetch()
         } else {
             replayNextUrl(pagingGson, cursor, responseClass)
         }
+        @Suppress("UNCHECKED_CAST")
+        val response: Resp = when (received) {
+            is ceui.pixiv.api.model.HomeIllustResponse -> received.copy(
+                illusts = received.illusts.map { ceui.pixiv.cache.IllustBookmarks.state.response(it, bookmarkRequest) },
+                ranking_illusts = received.ranking_illusts.map { ceui.pixiv.cache.IllustBookmarks.state.response(it, bookmarkRequest) },
+            )
+            is ceui.pixiv.api.model.IllustResponse -> received.copy(
+                illusts = received.illusts.map { ceui.pixiv.cache.IllustBookmarks.state.response(it, bookmarkRequest) },
+            )
+            else -> received
+        } as Resp
         val nextCursor = nextCursorOf(response)
         // 条目映射可能不便宜（转换、过滤、逐条建模），挪到后台保住 main-safe 契约
         val items = withContext(Dispatchers.Default) { mapper(response, phase) }

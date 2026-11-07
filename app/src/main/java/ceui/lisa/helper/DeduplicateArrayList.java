@@ -5,6 +5,8 @@ import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Predicate;
+import java.util.function.UnaryOperator;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -28,86 +30,96 @@ public class DeduplicateArrayList<E extends Deduplicatable> extends ArrayList<E>
     }
 
     public DeduplicateArrayList(@NonNull Collection<? extends E> c) {
-        super(c);
-        innerSet = new HashSet<>();
-        List<E> removeList = new ArrayList<>();
-        for (int i = 0; i < size(); i++) {
-            E e = get(i);
-            Object obj = e.getDuplicateKey();
-            if (innerSet.contains(obj)) {
-                removeList.add(e);
-            } else {
-                innerSet.add(obj);
-            }
-        }
-        removeAll(removeList);
+        this(c.size());
+        addAll(c);
     }
 
     @Override
     public boolean add(E e) {
-        Object obj = e.getDuplicateKey();
-        if (innerSet.contains(obj)) {
-            return true;
-        } else {
-            innerSet.add(obj);
-            return super.add(e);
-        }
+        return innerSet.add(e.getDuplicateKey()) && super.add(e);
     }
 
     @Override
     public void add(int index, E element) {
-        Object obj = element.getDuplicateKey();
-        if (!innerSet.contains(obj)) {
-            innerSet.add(obj);
-            super.add(index, element);
-        }
+        checkPosition(index);
+        if (innerSet.add(element.getDuplicateKey())) super.add(index, element);
     }
 
     @Override
     public boolean addAll(@NonNull Collection<? extends E> c) {
-        synchronized (this) {
-            List<E> cc = new ArrayList<>(c);
-            List<E> removeList = new ArrayList<>();
-            for (int i = 0; i < cc.size(); i++) {
-                E e = cc.get(i);
-                Object obj = e.getDuplicateKey();
-                if (innerSet.contains(obj)) {
-                    removeList.add(e);
-                } else {
-                    innerSet.add(obj);
-                }
-            }
-            cc.removeAll(removeList);
-            return super.addAll(cc);
-        }
+        return addAll(size(), c);
     }
 
     @Override
     public boolean addAll(int index, @NonNull Collection<? extends E> c) {
-        synchronized (this) {
-            List<E> cc = new ArrayList<>(c);
-            List<E> removeList = new ArrayList<>();
-            for (int i = 0; i < cc.size(); i++) {
-                E e = cc.get(i);
-                Object obj = e.getDuplicateKey();
-                if (innerSet.contains(obj)) {
-                    removeList.add(e);
-                } else {
-                    innerSet.add(obj);
-                }
-            }
-            cc.removeAll(removeList);
-            return super.addAll(index, cc);
+        checkPosition(index);
+        List<E> fresh = new ArrayList<>(c.size());
+        for (E item : c) {
+            if (innerSet.add(item.getDuplicateKey())) fresh.add(item);
         }
+        return super.addAll(index, fresh);
+    }
+
+    private void checkPosition(int index) {
+        if (index < 0 || index > size()) throw new IndexOutOfBoundsException("index=" + index);
+    }
+
+    private void rebuildKeys() {
+        innerSet.clear();
+        for (E item : this) innerSet.add(item.getDuplicateKey());
+    }
+
+    @Override public E set(int index, E element) {
+        E old = get(index);
+        Object key = element.getDuplicateKey();
+        if (!java.util.Objects.equals(old.getDuplicateKey(), key) && innerSet.contains(key)) {
+            throw new IllegalArgumentException("Duplicate key: " + key);
+        }
+        E result = super.set(index, element);
+        innerSet.remove(old.getDuplicateKey());
+        innerSet.add(key);
+        return result;
+    }
+
+    @Override public boolean removeAll(@NonNull Collection<?> c) {
+        try { return super.removeAll(c); } finally { rebuildKeys(); }
+    }
+
+    @Override public boolean retainAll(@NonNull Collection<?> c) {
+        try { return super.retainAll(c); } finally { rebuildKeys(); }
+    }
+
+    @Override public boolean removeIf(Predicate<? super E> filter) {
+        try { return super.removeIf(filter); } finally { rebuildKeys(); }
+    }
+
+    @Override protected void removeRange(int fromIndex, int toIndex) {
+        super.removeRange(fromIndex, toIndex);
+        rebuildKeys();
+    }
+
+    @Override public void replaceAll(UnaryOperator<E> operator) {
+        List<E> replacement = new ArrayList<>(size());
+        Set<Object> keys = new HashSet<>();
+        for (E item : this) {
+            E next = operator.apply(item);
+            if (!keys.add(next.getDuplicateKey())) throw new IllegalArgumentException("Duplicate replacement key");
+            replacement.add(next);
+        }
+        super.clear();
+        super.addAll(replacement);
+        innerSet = keys;
+    }
+
+    @Override public Object clone() {
+        return new DeduplicateArrayList<>(this);
     }
 
     @Override
     public boolean remove(@Nullable @org.jetbrains.annotations.Nullable Object o) {
-        if (o instanceof Deduplicatable) {
-            Object key = ((Deduplicatable) o).getDuplicateKey();
-            innerSet.remove(key);
-        }
-        return super.remove(o);
+        boolean removed = super.remove(o);
+        if (removed && o instanceof Deduplicatable) innerSet.remove(((Deduplicatable) o).getDuplicateKey());
+        return removed;
     }
 
     @Override
@@ -136,7 +148,7 @@ public class DeduplicateArrayList<E extends Deduplicatable> extends ArrayList<E>
             set.add(element.getDuplicateKey());
         }
         for (T element : src) {
-            if (!set.contains(element.getDuplicateKey())) {
+            if (set.add(element.getDuplicateKey())) {
                 dist.add(element);
             }
         }

@@ -34,12 +34,14 @@ internal suspend fun List<FeedItem>.withMirroredBookmarks(): List<FeedItem> {
     val bookmarkedNovels =
         if (novelIds.isEmpty()) emptySet()
         else mirror.bookmarkedAmong(MirrorContentType.NOVEL, novelIds)
-    if (bookmarkedIllusts.isEmpty() && bookmarkedNovels.isEmpty()) return this
+    ceui.pixiv.cache.IllustBookmarks.state.mirror(illustIds, bookmarkedIllusts,
+        ceui.pixiv.session.SessionManager.loggedInUid)
     return map { item ->
         when {
-            item is IllustFeedItem && item.illust.is_bookmarked != true &&
-                item.illust.id in bookmarkedIllusts ->
-                IllustFeedItem(item.illust.withBookmarked(true))
+            item is IllustFeedItem -> {
+                val next = ceui.pixiv.cache.IllustBookmarks.state.overlay(item.illust)
+                if (next === item.illust) item else IllustFeedItem(next, item.hidden)
+            }
 
             item is NovelFeedItem && item.novel.is_bookmarked != true &&
                 item.novel.id in bookmarkedNovels ->
