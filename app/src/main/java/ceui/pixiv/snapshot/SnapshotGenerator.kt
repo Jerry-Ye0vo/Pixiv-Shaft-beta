@@ -12,6 +12,8 @@ import ceui.pixiv.utils.hasTrustedCaption
 import ceui.pixiv.utils.isFullDetail
 import ceui.pixiv.utils.reconcileViewerStateFromMirror
 import ceui.pixiv.imageloader.ImageLoaderV3
+import ceui.pixiv.imageloader.ResumableOkHttpFetcher
+import ceui.pixiv.download.queue.ContentPhases
 import ceui.pixiv.ui.bulk.UgoiraEngine
 import ceui.pixiv.ui.bulk.UgoiraVideoEncoder
 import ceui.pixiv.ui.bulk.readFramesDir
@@ -34,12 +36,18 @@ import java.util.concurrent.atomic.AtomicInteger
  * 从在线详情页生成一份离线快照。
  *
  * 数据源优先级：ObjectPool 已有完整元数据 -> 缺失时回 v1/illust/detail 补齐；
- * 图片优先复用 ImageLoaderV3 已下好的共享文件，缺失时由它联网拉取。
+ * 图片优先复用对应 URL 的缓存；补下载经共享 NETWORK，复制和元数据提交经 COPY。
  * 动图另存一份帧序列（见 [copyUgoiraFrames]），p0 那张静图照常存，作封面与播放前的打底图。
  *
  * 正式快照写 manifest.json；自动快照写 auto_manifest.json（内部格式，转正后才成为正式快照）。
  */
 object SnapshotGenerator {
+    internal val transfers by lazy {
+        SnapshotAssetTransfers(ContentPhases.runner(Shaft.getContext())) { url ->
+            ResumableOkHttpFetcher.acquire(url, {}, saving = true)
+        }
+    }
+
 
     /**
      * 已就绪页的本地复制宽度。这一段是纯本地 IO、不碰网络，可以宽一些；再往上只会让同一批
@@ -64,7 +72,12 @@ object SnapshotGenerator {
      *        简介为空的作品光看 bean 判断不出「确认过没有简介」（见 hasTrustedCaption），
      *        批量补齐（[SnapshotBackfill]）每件已经自己拉过一次详情，再拉一次是白白翻倍的请求。
      */
-    suspend fun generate(
+    suspend fun generate(context: Context, illust: Illust, includeComments: Boolean, includeOriginal: Boolean,
+        freshDetail: Boolean = false, onProgress: suspend (String) -> Unit = {}): SnapshotManifest =
+        Shaft.sGson.fromJson(QueuedSnapshots.get(context).create(illust, includeComments, includeOriginal,
+            freshDetail, false, onProgress), SnapshotManifest::class.java)
+
+    internal suspend fun generateRaw(
         context: Context,
         illust: Illust,
         includeComments: Boolean,
@@ -82,18 +95,23 @@ object SnapshotGenerator {
         )
         try {
             val manifest = content.toSnapshotManifest(includeComments, includeOriginal)
-            writeJson(content.snapshotDir, SNAPSHOT_MANIFEST, manifest)
-            // 卡片上的快照标记读的是进程内索引，写完立刻登记：用户从详情页离线化完退回列表，
-            // 那张卡不用等下次扫描就该亮起来。
-            SnapshotIndex.onSnapshotWritten(manifest.illustId, manifest.snapshotId, isAuto = false, manifest.createdAt)
+            val index = { SnapshotIndex.onSnapshotWritten(manifest.illustId, manifest.snapshotId, isAuto = false, manifest.createdAt) }
+            val session = SnapshotPlanSession.current.get()
+            if (session != null) session.publish(manifest, false, index)
+            else { writeJson(content.snapshotDir, SNAPSHOT_MANIFEST, manifest); index() }
             manifest
         } catch (e: Exception) {
-            content.snapshotDir.deleteRecursively()
+            if (SnapshotPlanSession.current.get() == null) content.snapshotDir.deleteRecursively()
             throw e
         }
     }
 
-    suspend fun generateAuto(
+    suspend fun generateAuto(context: Context, illust: Illust, includeOriginal: Boolean = false,
+        onProgress: suspend (String) -> Unit = {}): AutoSnapshotManifest =
+        Shaft.sGson.fromJson(QueuedSnapshots.get(context).create(illust, false, includeOriginal,
+            false, true, onProgress), AutoSnapshotManifest::class.java)
+
+    internal suspend fun generateAutoRaw(
         context: Context,
         illust: Illust,
         includeOriginal: Boolean = false,
@@ -109,12 +127,13 @@ object SnapshotGenerator {
         )
         try {
             val manifest = content.toAutoSnapshotManifest(includeOriginal)
-            writeJson(content.snapshotDir, AUTO_SNAPSHOT_MANIFEST, manifest)
-            // 自动快照同样要算「有快照」：卡片标记不分正式/自动，只是点开时按 isAuto 回读。
-            SnapshotIndex.onSnapshotWritten(manifest.illustId, manifest.snapshotId, isAuto = true, manifest.createdAt)
+            val index = { SnapshotIndex.onSnapshotWritten(manifest.illustId, manifest.snapshotId, isAuto = true, manifest.createdAt) }
+            val session = SnapshotPlanSession.current.get()
+            if (session != null) session.publish(manifest, true, index)
+            else { writeJson(content.snapshotDir, AUTO_SNAPSHOT_MANIFEST, manifest); index() }
             manifest
         } catch (e: Exception) {
-            content.snapshotDir.deleteRecursively()
+            if (SnapshotPlanSession.current.get() == null) content.snapshotDir.deleteRecursively()
             throw e
         }
     }
@@ -141,7 +160,8 @@ object SnapshotGenerator {
         onProgress: suspend (String) -> Unit,
     ): SnapshotContent = withContext(Dispatchers.IO) {
         val appContext = context.applicationContext
-        val snapshotId = UUID.randomUUID().toString()
+        val session = SnapshotPlanSession.current.get()
+        val snapshotId = session?.request?.snapshotId ?: UUID.randomUUID().toString()
         val snapshotDir = SnapshotRepository.createSnapshotDir(appContext, snapshotId)
         // 进度文案是给用户看的,统一走资源;领域层不硬编码任何一种语言的 UI 串。
         suspend fun progress(@StringRes resId: Int, vararg args: Any) =
@@ -152,13 +172,16 @@ object SnapshotGenerator {
             // 归档要存「采集那一刻」的真实 viewer 态。调用方刚拉的完整版（freshDetail）与走到 else
             // 拿到的都是权威 detail，直接用；只有退回传入 bean（自建源 / 借号 / 历史快照来源，收藏与
             // 关注态可能是别人的）时，才用本地镜像补一次 —— 只读，不写池：快照生成不该改动 ObjectPool。
-            val fetched = when {
-                freshDetail -> illust
-                illust.isFullDetail() && illust.hasTrustedCaption() -> null
-                // toUpdate = false：快照生成只是读取完整元数据，不应改动 ObjectPool。
-                else -> fetchFullIllustDetail(illust.id, false)
+            suspend fun resolveBean(): Illust {
+                val fetched = when {
+                    freshDetail -> illust
+                    illust.isFullDetail() && illust.hasTrustedCaption() -> null
+                    else -> ContentPhases.run("snapshot", "detail", "snapshot-detail:${illust.id}",
+                        ceui.pixiv.download.queue.ContentQueueStore.Pool.NETWORK) { fetchFullIllustDetail(illust.id, false) }
+                }
+                return fetched ?: reconcileViewerStateFromMirror(illust, writeBack = false)
             }
-            val bean = fetched ?: reconcileViewerStateFromMirror(illust, writeBack = false)
+            val bean = session?.bean { resolveBean() } ?: resolveBean()
 
             val assets = linkedMapOf<String, String>()
             val pagePaths = mutableListOf<String>()
@@ -193,8 +216,8 @@ object SnapshotGenerator {
             val copyGate = Semaphore(COPY_PARALLELISM)
             val downloadGate = Semaphore(DOWNLOAD_PARALLELISM)
 
-            fun copyPage(plan: SnapshotPage, source: File) {
-                copyFileTo(source, File(snapshotDir, plan.rel))
+            suspend fun copyPage(plan: SnapshotPage, cached: File? = null) {
+                copyAssetUrl(appContext, plan.url, File(snapshotDir, plan.rel), plan.isOriginal, cached)
             }
 
             coroutineScope {
@@ -202,8 +225,7 @@ object SnapshotGenerator {
                 // 不会一次性把 N 页请求全打出去。
                 val pendingJobs = pendingPages.map { plan ->
                     async {
-                        val source = downloadGate.withPermit { fetchFile(appContext, plan.url, plan.isOriginal) }
-                        copyGate.withPermit { copyPage(plan, source) }
+                        downloadGate.withPermit { copyPage(plan) }
                         progress(R.string.snapshot_progress_images, donePages.incrementAndGet(), pageCount)
                     }
                 }
@@ -245,16 +267,23 @@ object SnapshotGenerator {
 
             val commentData = if (includeComments) {
                 progress(R.string.snapshot_progress_comments)
-                val response = Client.appApi.getIllustComments(bean.id)
-                val threads = response.comments.map { comment ->
-                    val replies = if (comment.has_replies) {
-                        runCatching { Client.appApi.getIllustReplyComments("illust", comment.id).comments }
-                            .getOrDefault(emptyList())
-                    } else {
-                        emptyList()
+                suspend fun fetchComments(): SnapshotComments {
+                    val response = ContentPhases.run("snapshot", "comments", "snapshot-comments:${bean.id}",
+                        ceui.pixiv.download.queue.ContentQueueStore.Pool.NETWORK) { Client.appApi.getIllustComments(bean.id) }
+                    val threads = response.comments.map { comment ->
+                        val replies = if (comment.has_replies) try {
+                            ContentPhases.run("snapshot", "comment-replies", "snapshot-replies:${comment.id}",
+                                ceui.pixiv.download.queue.ContentQueueStore.Pool.NETWORK) {
+                                Client.appApi.getIllustReplyComments("illust", comment.id).comments
+                            }
+                        } catch (cancelled: CancellationException) { throw cancelled }
+                        catch (failed: Exception) { emptyList() } else emptyList()
+                        SnapshotCommentThread(comment, replies)
                     }
-                    SnapshotCommentThread(comment, replies)
+                    return SnapshotComments(threads)
                 }
+                val frozenComments = session?.comments { fetchComments() } ?: fetchComments()
+                val threads = frozenComments.threads
                 progress(R.string.snapshot_progress_comment_assets)
                 val avatarRelByUrl = mutableMapOf<String, String>()
                 val stampRelByUrl = mutableMapOf<String, String>()
@@ -262,7 +291,7 @@ object SnapshotGenerator {
                     downloadCommentAssets(appContext, thread.comment, snapshotDir, assets, avatarRelByUrl, stampRelByUrl)
                     thread.replies.forEach { downloadCommentAssets(appContext, it, snapshotDir, assets, avatarRelByUrl, stampRelByUrl) }
                 }
-                SnapshotComments(threads)
+                frozenComments
             } else {
                 null
             }
@@ -286,10 +315,10 @@ object SnapshotGenerator {
                 comments = commentData,
                 fileCount = fileCount,
                 totalSize = totalSize,
-                createdAt = System.currentTimeMillis(),
+                createdAt = session?.request?.createdAt ?: System.currentTimeMillis(),
             )
         } catch (e: Exception) {
-            snapshotDir.deleteRecursively()
+            if (session == null) snapshotDir.deleteRecursively()
             throw e
         }
     }
@@ -382,6 +411,7 @@ object SnapshotGenerator {
                 onProgress(p.percent?.let { "$base  $it%" } ?: base)
             }
         }
+        if (SnapshotPlanSession.current.get()?.directoryReady(target) == true) { progressJob.cancel(); return@coroutineScope }
         val frames = try {
             UgoiraEngine.loadOriginalFrames(illust)
         } catch (ce: CancellationException) {
@@ -392,6 +422,7 @@ object SnapshotGenerator {
             progressJob.cancel()
         }
         // 握引擎的 per-illust 文件锁再读再拷：保存链路会往同一目录补压 mp4，播放器自愈会整目录删掉。
+        ceui.pixiv.ui.bulk.UgoiraCacheAccess.read {
         UgoiraEngine.fileLockFor(illust.id).withLock {
             val source = readFramesDir(frames.dir, frames.interpolated)
                 ?: throw SnapshotException(context.getString(R.string.snapshot_error_ugoira_frames))
@@ -399,33 +430,38 @@ object SnapshotGenerator {
                 ?: throw SnapshotException(context.getString(R.string.snapshot_error_ugoira_frames))
             source.video?.let { copyFileTo(it, File(target, UgoiraVideoEncoder.VIDEO_FILE_NAME)) }
         }
+        }
+        SnapshotPlanSession.current.get()?.preserveDirectory(target)
     }
 
     private suspend fun copyUrlTo(context: Context, url: String, target: File) {
-        copyFileTo(fetchFile(context, url), target)
+        copyAssetUrl(context, url, target, cached = ImageLoaderV3.peekCachedFile(url, false))
     }
 
-    /**
-     * 取回一个 url 的可用文件。
-     *
-     * 失败统一包成 [SnapshotException]；取消照旧往上抛 —— 页面销毁导致的取消不是「下载失败」，
-     * 包成异常会让上层把一次取消当错误处理。
-     */
-    private suspend fun fetchFile(context: Context, url: String, isOriginal: Boolean = false): File = try {
-        ImageLoaderV3.obtain(url, isOriginal = isOriginal).awaitFile()
-    } catch (ce: CancellationException) {
-        throw ce
-    } catch (e: Exception) {
-        throw SnapshotException(context.getString(R.string.snapshot_error_image_download, url), e)
+    private suspend fun copyAssetUrl(context: Context, url: String, target: File,
+                                     original: Boolean = false, cached: File? = null) {
+        try {
+            val session = SnapshotPlanSession.current.get()
+            if (session != null) session.resource("url:$url", target) { transfers.copyUrl(url, target, original, cached) }
+            else transfers.copyUrl(url, target, original, cached)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            throw SnapshotException(context.getString(R.string.snapshot_error_image_download, url), error)
+        }
     }
 
-    /** 把已就绪的文件复制进快照目录。纯本地 IO，不联网。 */
-    private fun copyFileTo(source: File, target: File) {
-        target.parentFile?.mkdirs()
-        source.copyTo(target, overwrite = true)
+    private suspend fun copyFileTo(source: File, target: File) {
+        val session = SnapshotPlanSession.current.get()
+        if (session != null) session.resource("local:${source.absolutePath}:${source.length()}:${source.lastModified()}", target) {
+            transfers.copyFile(source, target)
+        } else transfers.copyFile(source, target)
     }
 
-    private fun <T> writeJson(dir: File, name: String, value: T) {
-        File(dir, name).writeText(Shaft.sGson.toJson(value))
+    private suspend fun <T> writeJson(dir: File, name: String, value: T) {
+        val text = Shaft.sGson.toJson(value)
+        val session = SnapshotPlanSession.current.get()
+        if (session != null) session.resource("json:" + java.security.MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }, File(dir, name)) { transfers.writeText(File(dir, name), text) }
+        else transfers.writeText(File(dir, name), text)
     }
 }

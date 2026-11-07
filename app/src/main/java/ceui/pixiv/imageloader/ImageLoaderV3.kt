@@ -101,6 +101,16 @@ object ImageLoaderV3 {
         }
     }
 
+    /** All intentional static-page saves join the same queued source, including save-first order.
+     * The caller keeps the cache reference until local copy exits. Interrupt cancels only this waiter.
+     */
+    @JvmStatic
+    @WorkerThread
+    @Throws(InterruptedException::class)
+    fun acquireOriginalFile(url: String, onProgress: IntConsumer): OriginalFileLease = runBlocking {
+        ResumableOkHttpFetcher.acquire(url, { onProgress.accept(it) }, saving = true)
+    }
+
     /**
      * Blocking bridge for Manager's DownloadTask IO worker. Join the display fetch, then copy its
      * completed file through the normal save backend. A miss keeps Manager's own resumable path.
@@ -143,3 +153,4 @@ object ImageLoaderV3 {
         }
     }
 }
+

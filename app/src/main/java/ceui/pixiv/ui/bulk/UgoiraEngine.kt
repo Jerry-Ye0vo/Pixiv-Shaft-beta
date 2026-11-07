@@ -11,7 +11,9 @@ import ceui.pixiv.api.Client
 import ceui.lisa.models.FramesBean
 import ceui.lisa.models.GifResponse
 import ceui.pixiv.api.model.Illust
-import ceui.pixiv.download.StageStore
+import ceui.pixiv.download.queue.ContentPhaseRunner
+import ceui.pixiv.download.queue.ContentPhases
+import ceui.pixiv.download.queue.ContentQueueStore.Pool
 import ceui.lisa.utils.AnimatedGifEncoder
 import ceui.lisa.utils.Params
 import ceui.pixiv.ui.interpolate.RifeInterpolator
@@ -38,7 +40,6 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
-import okhttp3.Request
 import timber.log.Timber
 import java.io.BufferedOutputStream
 import java.io.File
@@ -197,15 +198,22 @@ object UgoiraEngine {
      * 阻塞,须在 IO 线程调用。
      */
     @JvmStatic
-    fun exportForSave(illust: Illust): UgoiraExport? {
+    @JvmOverloads
+    fun exportForSave(illust: Illust, preferVideo: Boolean = Shaft.sSettings.isUgoiraSaveAsMp4(),
+                      temporaryDirectory: File? = null): UgoiraExport? {
         val frames = peekPlayableFrames(illust) ?: return null
-        if (Shaft.sSettings.isUgoiraSaveAsMp4()) {
+        if (preferVideo) {
             exportVideo(illust, frames)?.let { return it }
         }
-        val temp = File(Shaft.getContext().cacheDir, "ugoira_save_${illust.id}.gif")
+        temporaryDirectory?.mkdirs()
+        val temp = File(temporaryDirectory ?: Shaft.getContext().cacheDir, "ugoira_save_${illust.id}.gif")
         return try {
-            BufferedOutputStream(FileOutputStream(temp)).use { bos ->
-                encodeFramesToGif(frames.files, frames.delaysMs, bos)
+            runBlocking {
+                ContentPhases.run("ugoira", "gif", "ugoira-gif:" + temp.absolutePath, Pool.ENCODE) {
+                    BufferedOutputStream(FileOutputStream(temp)).use { bos ->
+                        encodeFramesToGif(frames.files, frames.delaysMs, bos)
+                    }
+                }
             }
             Timber.tag(UGOIRA_LOG_TAG).i("[save] illust=%d 由帧序列编出临时 GIF (%d帧, %d bytes)", illust.id, frames.files.size, temp.length())
             UgoiraExport(temp, isVideo = false, temporary = true)
@@ -280,10 +288,12 @@ object UgoiraEngine {
      */
     suspend fun purgeBrokenFrames(illustId: Long, dir: File) {
         invalidate(illustId)
+        UgoiraCacheAccess.maintain {
         fileLockFor(illustId).withLock {
             if (dir.deleteRecursively()) {
                 Timber.tag(UGOIRA_LOG_TAG).w("[engine] illust=%d 已删除疑似损坏的帧目录 %s", illustId, dir.name)
             }
+        }
         }
     }
 
@@ -312,6 +322,8 @@ object UgoiraEngine {
     @JvmStatic
     fun sweepStaleRifeWork(context: Context) {
         engineScope.launch {
+            try {
+            UgoiraCacheAccess.maintain {
             runCatching {
                 val rifeWork = context.cacheDir.listFiles()
                     ?.filter { it.isDirectory && it.name.startsWith(RIFE_WORK_PREFIX) }
@@ -355,6 +367,9 @@ object UgoiraEngine {
                         .i("[sweep] 清掉 %d 个残留(rife_work / frames.tmp / video.mp4.tmp),回收 %d KB", removed, freed / 1024)
                 }
             }.onFailure { Timber.tag(UGOIRA_LOG_TAG).w(it, "[sweep] 清扫残留补帧目录失败") }
+            }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) { Timber.tag(UGOIRA_LOG_TAG).w(failure, "Cache maintenance admission failed") }
         }
     }
 
@@ -416,7 +431,7 @@ object UgoiraEngine {
             return@synchronized existing
         }
         Timber.tag(UGOIRA_LOG_TAG).i("[loadPlayableFrames] illust=%d 启动新任务,await", id)
-        val d = engineScope.async { runPipeline(illust) }
+        val d = engineScope.async { UgoiraCacheAccess.read { runPipeline(illust) } }
         jobs[id] = d
         d
     }
@@ -583,7 +598,7 @@ object UgoiraEngine {
                             flow.value = UgoiraProgress(UgoiraPhase.DOWNLOAD_ZIP)
                             Timber.tag(UGOIRA_LOG_TAG).i("[pipeline] illust=%d [2/4] DOWNLOAD_ZIP 开始 -> %s", id, zipFile.name)
                             var lastQuarter = -1
-                            downloadZipTo(zipUrl, zipFile) { pct ->
+                            downloadQueuedZipTo(zipUrl, zipFile) { pct ->
                                 flow.value = UgoiraProgress(UgoiraPhase.DOWNLOAD_ZIP, pct)
                                 if (pct / 25 != lastQuarter) {
                                     lastQuarter = pct / 25
@@ -604,7 +619,9 @@ object UgoiraEngine {
                             flow.value = UgoiraProgress(UgoiraPhase.EXTRACT)
                             Timber.tag(UGOIRA_LOG_TAG).i("[pipeline] illust=%d [3/4] EXTRACT 开始 (磁盘有 %d 帧,期望 %d)", id, onDisk, expected)
                             try {
-                                ZipUtils.unzipFile(zipFile, unzipFolder)
+                                ContentPhases.run("ugoira", "extract", "ugoira-extract:" + unzipFolder.absolutePath, Pool.COPY) {
+                                    ZipUtils.unzipFile(zipFile, unzipFolder)
+                                }
                             } catch (t: Throwable) {
                                 runCatching { zipFile.delete() }
                                 throw t
@@ -647,15 +664,17 @@ object UgoiraEngine {
                                 Timber.tag(UGOIRA_LOG_TAG).i("[pipeline] illust=%d [3.5/4] INTERPOLATE 开始 (%d帧)", id, srcFrames.size)
                                 var lastQuarter = -1
                                 val pipelineJob = coroutineContext[Job]
-                                val rife = RifeInterpolator.interpolate(
-                                    ctx, unzipFolder, srcDelays,
-                                    workRoot = rifeWorkRoot,
-                                    isActive = { pipelineJob?.isActive != false },
-                                ) { pct ->
-                                    flow.value = UgoiraProgress(UgoiraPhase.INTERPOLATE, pct)
-                                    if (pct / 25 != lastQuarter) {
-                                        lastQuarter = pct / 25
-                                        Timber.tag(UGOIRA_LOG_TAG).i("[pipeline] illust=%d [3.5/4] INTERPOLATE %d%%", id, pct)
+                                val rife = ContentPhases.run("ugoira", "interpolate", "ugoira-rife:$id", Pool.ENCODE) {
+                                    RifeInterpolator.interpolate(
+                                        ctx, unzipFolder, srcDelays,
+                                        workRoot = rifeWorkRoot,
+                                        isActive = { pipelineJob?.isActive != false },
+                                    ) { pct ->
+                                        flow.value = UgoiraProgress(UgoiraPhase.INTERPOLATE, pct)
+                                        if (pct / 25 != lastQuarter) {
+                                            lastQuarter = pct / 25
+                                            Timber.tag(UGOIRA_LOG_TAG).i("[pipeline] illust=%d [3.5/4] INTERPOLATE %d%%", id, pct)
+                                        }
                                     }
                                 }
                                 if (rife != null) {
@@ -789,6 +808,22 @@ internal val ugoiraHttpClient: OkHttpClient by lazy {
         .build()
 }
 
+/** Production entry: admission and a shared NETWORK claim precede client creation and any body IO.
+ * The raw worker below remains injectable for protocol tests; it has no independent dispatch power.
+ */
+internal suspend fun downloadQueuedZipTo(
+    url: String,
+    target: File,
+    runner: ContentPhaseRunner = ContentPhases.runner(Shaft.getContext()),
+    client: () -> OkHttpClient = { ugoiraHttpClient },
+    onProgress: (Int) -> Unit = {},
+) = runner.run("ugoira", "zip", "ugoira-zip:" + target.absolutePath, Pool.NETWORK,
+    com.google.gson.Gson().toJson(mapOf("url" to url, "target" to target.absolutePath))) {
+    // Another playback/save pipeline may have finished while this request waited for capacity.
+    if (target.isFile && target.length() > 0) onProgress(100)
+    else downloadZipTo(url, target, client(), onProgress)
+}
+
 /**
  * OkHttp 直下 zip 到 [target]。pixiv 服务器要 Referer，否则 403。
  * .part + .part.meta 保留已下字节和资源校验信息，中断后用 Range / If-Range 续传。
@@ -801,135 +836,16 @@ internal suspend fun downloadZipTo(
     client: OkHttpClient = ugoiraHttpClient,
     onProgress: (Int) -> Unit = {},
 ) {
-    // 和 GlideUrlChild / Manager 同款:按用户选的图片 host 重写(i.pximg.net → 代理),
-    // path-agnostic 所以 zip 路径照样走代理;PIXIV 模式是 no-op(配合上面直连 client 加速)。
     val realUrl = ImageHostManager.rewrite(url)
     Timber.tag(UGOIRA_LOG_TAG).i("[downloadZipTo] 实际下载 URL=%s", realUrl)
-    target.parentFile?.mkdirs()
-    val temp = File(target.parentFile, target.name + ".part")
-    val meta = File(target.parentFile, target.name + ".part.meta")
-    val manifest = StageStore.readManifest(meta)?.takeIf {
-        // 切图片代理、旧版无元数据的 partial、弱校验器均不能证明字节属于同一版资源。
-        it.url == realUrl && !it.validator.isNullOrBlank() &&
-            (it.validatorType == StageStore.VALIDATOR_LASTMOD ||
-                (it.validatorType == StageStore.VALIDATOR_ETAG && it.validator.startsWith('"'))) &&
-            (it.total < 0 || temp.length() <= it.total)
-    }
-    // 异常 Range 响应最多回退一次全量请求，避免用户手动重试才能恢复，也避免无限循环。
-    repeat(2) { attempt ->
-        coroutineContext.ensureActive()
-        val existing = if (attempt == 0 && manifest != null) temp.length() else 0L
-        val req = Request.Builder()
-            .url(realUrl)
-            .header("Referer", Params.IMAGE_REFERER)
-            .header("User-Agent", Params.PHONE_MODEL)
-            // offset 必须是实际保存的字节数，不能混用透明 gzip 解码前后的长度。
-            .header("Accept-Encoding", "identity")
-            .apply {
-                if (existing > 0) {
-                    header("Range", "bytes=$existing-")
-                    header("If-Range", manifest!!.validator!!)
-                }
-            }
-            .build()
-        val complete = client.newCall(req).execute().use { r ->
-            coroutineContext.ensureActive()
-            if (!r.isSuccessful && r.code != 416) {
-                throw IOException("zip download HTTP ${r.code} url=$url")
-            }
-            val body = r.body ?: throw IOException("zip body null url=$url")
-            val encoding = r.header("Content-Encoding")
-            if (encoding != null && !encoding.equals("identity", ignoreCase = true)) {
-                throw IOException("unexpected zip Content-Encoding: $encoding")
-            }
-            val range = StageStore.parseContentRange(r.header("Content-Range"))
-            val responseValidator = when (manifest?.validatorType) {
-                StageStore.VALIDATOR_ETAG -> r.header("ETag")
-                StageStore.VALIDATOR_LASTMOD -> r.header("Last-Modified")
-                else -> null
-            }
-            if (r.code == 416) {
-                // 仅凭大小相同不能证明资源没变；还要响应校验器与原记录相同。
-                // 首次 chunked 响应可能没给总长，此时以 416 的总长与已存字节数确认完整。
-                return@use existing > 0 && range?.start == -1L && range.total == existing &&
-                    manifest != null && (manifest.total < 0 || manifest.total == existing) &&
-                    responseValidator == manifest.validator &&
-                    temp.length() == existing
-            }
-            val append = r.code == 206
-            if (append) {
-                if (existing == 0L || range == null || range.start != existing ||
-                    range.total <= existing || range.end != range.total - 1 ||
-                    (body.contentLength() >= 0 && body.contentLength() != range.total - existing) ||
-                    (manifest!!.total >= 0 && manifest.total != range.total) ||
-                    (responseValidator != null && responseValidator != manifest.validator)
-                ) return@use false
-            } else if (r.code != 200) {
-                throw IOException("unexpected zip download HTTP ${r.code}")
-            }
-            val total = if (append) range!!.total else body.contentLength()
-            val offset = if (append) existing else 0L
-            // append 前再确认文件未被清缓存删掉，避免 FileOutputStream 静默重建只含尾部的文件。
-            if (append && temp.length() != offset) return@use false
-            FileOutputStream(temp, append).use { out ->
-                if (!append) {
-                    // 先截断旧字节再替换元数据，进程被杀也不能用新 validator 续接旧字节。
-                    // 元数据无法写入时，下次安全退化成全量下载。
-                    if (meta.exists() && !meta.delete()) throw IOException("cannot reset zip metadata")
-                    val etag = r.header("ETag")?.trim()
-                    val strongEtag = etag?.takeIf { it.startsWith('"') && it.endsWith('"') }
-                    val modified = r.headers.getDate("Last-Modified")?.time
-                    val date = r.headers.getDate("Date")?.time
-                    // RFC 9110 13.1.5：弱 ETag 不可用于 If-Range；只有没有 ETag 时才用日期。
-                    // 给 Date / Last-Modified 留 60s 间隔，避免秒级精度与时钟差异。
-                    val lastModified = r.header("Last-Modified")?.takeIf {
-                        etag == null && modified != null && date != null && date - modified >= 60_000L
-                    }
-                    StageStore.writeManifest(meta, StageStore.buildManifest(realUrl, strongEtag, lastModified, total))
-                }
-                val input = body.byteStream()
-                val buf = ByteArray(16 * 1024)
-                var readTotal = offset
-                var lastPct = -1
-                fun reportProgress() {
-                    if (total > 0) {
-                        val pct = (readTotal.toDouble() * 100 / total).toInt().coerceIn(0, 100)
-                        if (pct != lastPct) {
-                            lastPct = pct
-                            onProgress(pct)
-                        }
-                    }
-                }
-                reportProgress()
-                while (true) {
-                    coroutineContext.ensureActive()
-                    val n = input.read(buf)
-                    coroutineContext.ensureActive()
-                    if (n < 0) break
-                    out.write(buf, 0, n)
-                    readTotal += n
-                    reportProgress()
-                }
-                val storedLength = temp.length()
-                if (readTotal == 0L || (total >= 0 && readTotal != total) || storedLength != readTotal) {
-                    // 顺序写入的短响应仍是有效前缀，保留 validator 给下一次续传。
-                    // 文件被外部清理或字节超过声明总长时，才放弃这个断点。
-                    if (storedLength != readTotal || (total >= 0 && readTotal > total)) meta.delete()
-                    throw IOException("zip length mismatch: $storedLength / $total")
-                }
-            }
-            true
-        }
-        if (complete) {
-            coroutineContext.ensureActive()
-            if (target.exists() && !target.delete()) throw IOException("cannot replace zip ${target.name}")
-            if (!temp.renameTo(target)) throw IOException("rename .part → ${target.name} failed")
-            meta.delete()
-            onProgress(100)
-            return
+    var last = -1
+    ceui.pixiv.download.network.ResumableFileTransfer.transfer(realUrl, target, client,
+        mapOf("Referer" to Params.IMAGE_REFERER, "User-Agent" to Params.PHONE_MODEL)) { read, total ->
+        if (total > 0) {
+            val percent = (read.toDouble() * 100 / total).toInt().coerceIn(0, 100)
+            if (percent != last) { last = percent; onProgress(percent) }
         }
     }
-    throw IOException("invalid zip range response url=$url")
 }
 
 /**
@@ -1044,6 +960,16 @@ internal suspend fun writeFramesDir(
     srcFrames: List<File>,
     delaysMs: List<Int>,
     onProgress: (Int) -> Unit = {},
+): UgoiraFrames? = ContentPhases.run("ugoira", "frames", "ugoira-frames:" + target.absolutePath,
+    if (srcFrames.all { it.extension.equals("jpg", true) || it.extension.equals("jpeg", true) }) Pool.COPY else Pool.ENCODE) {
+    writeFramesDirClaimed(target, srcFrames, delaysMs, onProgress)
+}
+
+private suspend fun writeFramesDirClaimed(
+    target: File,
+    srcFrames: List<File>,
+    delaysMs: List<Int>,
+    onProgress: (Int) -> Unit,
 ): UgoiraFrames? {
     if (srcFrames.isEmpty() || srcFrames.size != delaysMs.size) return null
     val tmp = File(target.parentFile, target.name + FRAMES_TMP_SUFFIX)
@@ -1130,11 +1056,13 @@ private fun buildGlobalPalette(files: List<File>): ByteArray? {
     val buf = ByteArray(PALETTE_SAMPLE_PIXELS * 3)
     var w = 0
     for (p in 0 until pickCount) {
+        UgoiraOutputSession.current.get()?.context?.checkStop()
         val file = files[(p.toLong() * files.size / pickCount).toInt()]
-        val bmp: Bitmap = BitmapFactory.decodeFile(file.absolutePath) ?: continue
+        val bmp: Bitmap = BitmapFactory.decodeFile(file.absolutePath)
+            ?: throw java.io.IOException("Cannot decode ugoira palette frame: $file")
         try {
             val nPix = bmp.width * bmp.height
-            if (nPix <= 0) continue
+            if (nPix <= 0) throw java.io.IOException("Empty ugoira frame: $file")
             val row = IntArray(nPix)
             bmp.getPixels(row, 0, bmp.width, 0, 0, bmp.width, bmp.height)
             val take = minOf(perFrame, nPix)
@@ -1186,8 +1114,9 @@ internal fun encodeFramesToGif(
     out: OutputStream,
     onProgress: (Int) -> Unit = {},
 ) {
+    require(files.isNotEmpty()) { "No ugoira frames to encode" }
     val encoder = AnimatedGifEncoder()
-    encoder.start(out)
+    check(encoder.start(out)) { "Cannot start GIF encoder" }
     encoder.setRepeat(0) // 无限循环
     // 全局调色板:消掉逐帧调色板导致的帧间闪烁,同时省掉 N-1 次 NeuQuant 训练。
     // 抽样失败(帧全解不开)就退回逐帧,不影响出片。
@@ -1195,15 +1124,17 @@ internal fun encodeFramesToGif(
     val total = files.size
     val gifDelays = gifFrameDelaysMs(delaysMs, files.size)
     for ((i, f) in files.withIndex()) {
+        UgoiraOutputSession.current.get()?.context?.checkStop()
         encoder.setDelay(gifDelays[i])
         val bmp: Bitmap? = BitmapFactory.decodeFile(f.absolutePath)
         if (bmp != null) {
-            encoder.addFrame(bmp)
-            bmp.recycle()
+            try { check(encoder.addFrame(bmp)) { "Cannot encode ugoira frame: $f" } }
+            finally { bmp.recycle() }
         } else {
-            Timber.tag(UGOIRA_PIPELINE_TAG).w("[UGOIRA] decode frame failed $f")
+            throw java.io.IOException("Cannot decode ugoira frame: $f")
         }
         onProgress((i + 1) * 100 / total)
     }
-    encoder.finish()
+    check(encoder.finish()) { "Cannot finish GIF encoder" }
 }
+

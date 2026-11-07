@@ -14,6 +14,16 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.ensureActive
+import ceui.pixiv.download.StageStore
+import ceui.pixiv.download.queue.ContentPhases
+import ceui.pixiv.download.queue.ContentPhaseRunner
+import ceui.pixiv.download.queue.ContentQueueStore.Pool
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -247,8 +257,34 @@ class ApkDownloadManager @Inject constructor(private val app: Application) {
 
     private class ProxyChangedException : IOException("GitHub 加速地址已变更")
 
+    // Set only by package tests before install/start; no worker captures Activity or test state.
+    internal var environment: ApkDownloadEnvironment? = null
+    private fun phases(): ContentPhaseRunner = environment?.phases ?: ContentPhases.runner(app)
+    private fun proxyPrefix(): String = environment?.proxyPrefix?.invoke() ?: GithubProxy.currentPrefix()
+    private fun wrap(url: String): String = environment?.wrap?.invoke(url) ?: GithubProxy.wrap(url)
     private val gson by lazy { Gson() }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    private val commands = Channel<suspend () -> Unit>(Channel.UNLIMITED)
+    private val commandWorker = scope.launch {
+        for (command in commands) {
+            try { command() }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: Exception) {
+                Timber.tag(TAG).e(error, "APK queue command failed")
+                publish(loadRecord(), Phase.FAILED, reason = Reason.IO)
+            }
+        }
+    }
+    private fun command(block: suspend () -> Unit) { commands.trySend(block) }
+    internal fun restoreForTesting() { command { restore() } }
+    internal suspend fun awaitCommands() {
+        val done = kotlinx.coroutines.CompletableDeferred<Unit>()
+        commands.send { done.complete(Unit) }; done.await()
+    }
+    internal suspend fun shutdown() {
+        scope.coroutineContext[Job]?.cancelAndJoin(); commands.close()
+    }
 
     private val _state = MutableStateFlow(State())
     val state: StateFlow<State> = _state.asStateFlow()
@@ -268,7 +304,7 @@ class ApkDownloadManager @Inject constructor(private val app: Application) {
         clients.getOrPut(readTimeoutMs) { buildClient(readTimeoutMs) }
 
     private fun buildClient(readTimeoutMs: Long): OkHttpClient =
-        Retro.getLogClient()
+        environment?.client?.invoke(readTimeoutMs) ?: Retro.getLogClient()
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(readTimeoutMs, TimeUnit.MILLISECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
@@ -316,11 +352,10 @@ class ApkDownloadManager @Inject constructor(private val app: Application) {
     // ---------------------------------------------------------------- 生命周期
 
     /**
-     * 进程启动时调用一次（`Shaft.onCreate`）。只读 MMKV + stat 几个文件，可以在主线程跑。
+     * 进程启动时调用一次（`Shaft.onCreate`）。生命周期登记在主线程；恢复和所有后续状态命令在 IO 序列执行。
      */
     fun install() {
         if (!installed.compareAndSet(false, true)) return
-        cancelLegacySystemDownload()
         app.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
             override fun onActivityResumed(activity: Activity) {
                 // 「下载完成但当时没有 sheet」的 banner 要等到前台才发；
@@ -335,7 +370,7 @@ class ApkDownloadManager @Inject constructor(private val app: Application) {
             override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
             override fun onActivityDestroyed(activity: Activity) = Unit
         })
-        restore()
+        command { cancelLegacySystemDownload(); restore() }
     }
 
     /**
@@ -395,8 +430,10 @@ class ApkDownloadManager @Inject constructor(private val app: Application) {
         }
 
         if (!partsExist(rec)) {
-            clearRecord()
-            publish(null, Phase.IDLE)
+            // Admission may have committed before probe/first-byte IO. Keep that accepted intent.
+            rec.status = STATUS_PAUSED
+            saveRecord(rec)
+            publish(rec, Phase.PAUSED, resumable = false)
             return
         }
 
@@ -424,7 +461,8 @@ class ApkDownloadManager @Inject constructor(private val app: Application) {
      * 开始下载。同版本且有可用断点 → 续传；否则从头来。
      * 调用方（sheet）不需要自己判断状态，全部交给 [state] 渲染。
      */
-    fun start(release: GitHubRelease) {
+    fun start(release: GitHubRelease) { command { startQueued(release) } }
+    private suspend fun startQueued(release: GitHubRelease) {
         val asset = AppUpdateChecker.findApkAsset(release) ?: return
         val existing = loadRecord()
         val current = _state.value.phase
@@ -447,7 +485,23 @@ class ApkDownloadManager @Inject constructor(private val app: Application) {
     }
 
     /** 无条件从头下：删掉断点、重新探测、重新分片。 */
-    fun restart(release: GitHubRelease) {
+    fun restart(release: GitHubRelease) { command { restartQueued(release) } }
+    /** Unified-manager commands keep MMKV v2 and all existing partial-file identities. */
+    fun resume() { command { loadRecord()?.let(::parseRelease)?.let { startQueued(it) } } }
+    fun pause() { command {
+        if (_state.value.phase !in setOf(Phase.RUNNING, Phase.MERGING)) return@command
+        stopCurrent()
+        val rec = loadRecord() ?: return@command
+        rec.status = STATUS_PAUSED; saveRecord(rec)
+        publish(rec, Phase.PAUSED, downloadedOf(rec), resumable = partsExist(rec))
+    } }
+    fun cancel() { command {
+        if (_state.value.phase in setOf(Phase.IDLE, Phase.COMPLETED)) return@command
+        stopCurrent()
+        phases().run("apk-manager", "apk-cancel", "apk-directory", Pool.COPY) { deleteAllFiles(strict = true) }
+        clearRecord(); publish(null, Phase.IDLE)
+    } }
+    private suspend fun restartQueued(release: GitHubRelease) {
         val asset = AppUpdateChecker.findApkAsset(release) ?: return
         stopCurrent()
         beginFresh(release, asset)
@@ -471,7 +525,8 @@ class ApkDownloadManager @Inject constructor(private val app: Application) {
     }
 
     /** 下载完成、但没有任何 sheet 在看时调用，交给 [UpdateBanner] 决定什么时候弹。 */
-    fun consumeBannerPending() {
+    fun consumeBannerPending() { command { consumeBannerPendingQueued() } }
+    private fun consumeBannerPendingQueued() {
         val rec = loadRecord() ?: return
         if (!rec.bannerPending) return
         rec.bannerPending = false
@@ -487,10 +542,10 @@ class ApkDownloadManager @Inject constructor(private val app: Application) {
 
     // ---------------------------------------------------------------- 内部实现
 
-    private fun stopCurrent() {
+    private suspend fun stopCurrent() {
         runToken++
         abortCalls()
-        job?.cancel()
+        job?.cancelAndJoin() // physical closes and queue acknowledgements precede path reuse
         job = null
     }
 
@@ -500,18 +555,18 @@ class ApkDownloadManager @Inject constructor(private val app: Application) {
     }
 
     private fun beginFresh(release: GitHubRelease, asset: GitHubAsset) {
-        deleteAllFiles()
         val rec = Record(
             tag = release.tagName,
             versionName = release.versionName,
             releaseJson = gson.toJson(release),
-            url = GithubProxy.wrap(asset.downloadUrl),
-            proxyPrefix = GithubProxy.currentPrefix(),
+            url = wrap(asset.downloadUrl),
+            proxyPrefix = proxyPrefix(),
             // 先拿 API 给的 size 垫着，探测回来再校正（订阅合成的 release size 恒为 0）。
             totalBytes = asset.size.coerceAtLeast(0L),
             status = STATUS_RUNNING,
         )
         saveRecord(rec)
+        deleteAllFiles(strict = true) // no old representation may survive into a fresh plan
         publish(rec, Phase.RUNNING, downloaded = 0L)
         launchJob(rec, fresh = true)
     }
@@ -525,7 +580,7 @@ class ApkDownloadManager @Inject constructor(private val app: Application) {
             rec,
             Phase.RUNNING,
             downloadedOf(rec),
-            activeThreads = minOf(DEFAULT_THREADS, rec.segments.size),
+            activeThreads = 0,
         )
         launchJob(rec, fresh = false)
     }
@@ -556,7 +611,7 @@ class ApkDownloadManager @Inject constructor(private val app: Application) {
             } catch (e: Throwable) {
                 if (token != runToken) return@launch
                 Timber.tag(TAG).e(e, "下载失败")
-                fail(rec, Reason.UNKNOWN, resumable = false)
+                fail(rec, Reason.UNKNOWN, resumable = rec.rangeSupported && partsExist(rec))
             }
         }
     }
@@ -574,7 +629,7 @@ class ApkDownloadManager @Inject constructor(private val app: Application) {
             rec,
             Phase.RUNNING,
             downloaded = 0L,
-            activeThreads = minOf(DEFAULT_THREADS, rec.segments.size),
+            activeThreads = 0,
         )
     }
 
@@ -583,7 +638,7 @@ class ApkDownloadManager @Inject constructor(private val app: Application) {
      * 还是同一个文件，硬拼出来就是「解析包出错」，比从头下更糟。
      */
     private suspend fun validateResume(rec: Record) {
-        if (GithubProxy.currentPrefix() != rec.proxyPrefix) {
+        if (proxyPrefix() != rec.proxyPrefix) {
             throw NotResumableException("加速地址已变更")
         }
         if (!rec.rangeSupported) {
@@ -593,6 +648,12 @@ class ApkDownloadManager @Inject constructor(private val app: Application) {
         if (!probe.rangeSupported) throw NotResumableException("服务器不再支持断点续传")
         if (probe.totalBytes > 0L && rec.totalBytes > 0L && probe.totalBytes != rec.totalBytes) {
             throw NotResumableException("文件大小已变化")
+        }
+        if (!strongEtag(rec.etag) && rec.lastModified.isNullOrBlank()) {
+            throw NotResumableException("原断点缺少可验证的资源标识")
+        }
+        if (!rec.lastModified.isNullOrBlank() && !strongEtag(rec.etag) && probe.lastModified != rec.lastModified) {
+            throw NotResumableException("远端修改时间已变化")
         }
         if (!probe.etag.isNullOrBlank() && !rec.etag.isNullOrBlank() && probe.etag != rec.etag) {
             throw NotResumableException("远端文件已更新")
@@ -616,7 +677,7 @@ class ApkDownloadManager @Inject constructor(private val app: Application) {
      * 所以 200 时再换一个正常大小的区间（`bytes=0-1048575`）复核一次，
      * 两次都 200 才认定这个源不能切。
      */
-    private fun probe(url: String): Probe {
+    private suspend fun probe(url: String): Probe {
         val first = probeOnce(url, "bytes=0-0")
         if (first.rangeSupported) return first
         val second = probeOnce(url, "bytes=0-${MIN_CHUNK_BYTES - 1}")
@@ -632,36 +693,37 @@ class ApkDownloadManager @Inject constructor(private val app: Application) {
         return second
     }
 
-    private fun probeOnce(url: String, range: String): Probe {
-        val request = Request.Builder()
-            .url(url)
-            .header("Range", range)
-            .header("Accept-Encoding", "identity")
-            .build()
-        client.newCall(request).execute().use { response ->
-            val rangeSupported = response.code == 206
-            val total = if (rangeSupported) {
-                parseTotal(response.header("Content-Range"))
-            } else {
-                response.body?.contentLength()?.takeIf { it > 0L } ?: -1L
+    private suspend fun probeOnce(url: String, range: String): Probe = phases().run("apk", "probe",
+        "apk-probe:" + url, Pool.NETWORK, gson.toJson(mapOf("url" to url, "range" to range))) {
+        probeOnceClaimed(url, range)
+    }
+
+    private suspend fun probeOnceClaimed(url: String, range: String): Probe {
+        val request = Request.Builder().url(url).header("Range", range)
+            .header("Accept-Encoding", "identity").build()
+        val call = client.newCall(request)
+        val stopping = cancellationWatcher(call)
+        try {
+            currentCoroutineContext().ensureActive()
+            call.execute().use { response ->
+                val rangeSupported = response.code == 206
+                val total = if (rangeSupported) parseTotal(response.header("Content-Range"))
+                    else response.body?.contentLength()?.takeIf { it > 0L } ?: -1L
+                Timber.tag(TAG).i("探测 Range=%s → HTTP %d, Content-Range=%s, total=%d",
+                    range, response.code, response.header("Content-Range"), total)
+                if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+                if (rangeSupported && total <= 0) throw NotResumableException("Invalid APK range probe")
+                val etag = response.header("ETag")?.trim()
+                val modified = response.headers.getDate("Last-Modified")?.time
+                val date = response.headers.getDate("Date")?.time
+                val lastModified = response.header("Last-Modified")?.takeIf {
+                    etag == null && modified != null && date != null && date - modified >= 60_000L
+                }
+                return Probe(total, rangeSupported, etag, lastModified)
             }
-            Timber.tag(TAG).i(
-                "探测 Range=%s → HTTP %d, Accept-Ranges=%s, Content-Range=%s, total=%d, 最终URL=%s",
-                range,
-                response.code,
-                response.header("Accept-Ranges"),
-                response.header("Content-Range"),
-                total,
-                response.request.url,
-            )
-            if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
-            return Probe(
-                totalBytes = total,
-                rangeSupported = rangeSupported,
-                etag = response.header("ETag"),
-                lastModified = response.header("Last-Modified"),
-            )
-        }
+        } catch (error: Exception) {
+            currentCoroutineContext().ensureActive(); throw error
+        } finally { stopping.cancel() }
     }
 
     /** `Content-Range: bytes 0-0/12345` → 12345；`*` 或缺头 → -1。 */
@@ -828,12 +890,7 @@ class ApkDownloadManager @Inject constructor(private val app: Application) {
                 async(Dispatchers.IO) {
                     while (true) {
                         val index = claimOrSteal() ?: return@async
-                        active.incrementAndGet()
-                        try {
-                            downloadSegmentWithRetry(rec, index, progress, lastActivity)
-                        } finally {
-                            active.decrementAndGet()
-                        }
+                        downloadSegmentWithRetry(rec, index, progress, lastActivity, active)
                     }
                 }
             }.awaitAll()
@@ -872,11 +929,18 @@ class ApkDownloadManager @Inject constructor(private val app: Application) {
         index: Int,
         progress: ConcurrentHashMap<Int, AtomicLong>,
         lastActivity: ConcurrentHashMap<Int, AtomicLong>,
+        active: AtomicInteger,
     ) {
         var attempt = 0
         while (true) {
             try {
-                downloadSegment(rec, index, progress, lastActivity)
+                phases().run("apk", "segment", "apk-part:" + partFile(rec, index)?.absolutePath,
+                    Pool.NETWORK, gson.toJson(mapOf("tag" to rec.tag, "url" to rec.url, "index" to index))) {
+                    currentCoroutineContext().ensureActive()
+                    active.incrementAndGet()
+                    try { downloadSegment(rec, index, progress, lastActivity) }
+                    finally { active.decrementAndGet() }
+                }
                 return
             } catch (e: NotResumableException) {
                 throw e
@@ -905,7 +969,7 @@ class ApkDownloadManager @Inject constructor(private val app: Application) {
         }
     }
 
-    private fun downloadSegment(
+    private suspend fun downloadSegment(
         rec: Record,
         index: Int,
         progress: ConcurrentHashMap<Int, AtomicLong>,
@@ -927,9 +991,14 @@ class ApkDownloadManager @Inject constructor(private val app: Application) {
             return
         }
 
-        val builder = Request.Builder().url(rec.url)
+        val requestedStart = chunk.start + have
+        val requestedEnd = chunk.end
+        val builder = Request.Builder().url(rec.url).header("Accept-Encoding", "identity")
         if (rec.rangeSupported) {
-            builder.header("Range", "bytes=${chunk.start + have}-${chunk.end}")
+            val validator = rec.etag?.takeIf(::strongEtag) ?: rec.lastModified
+            if (have > 0 && validator.isNullOrBlank()) throw NotResumableException("分片缺少续传校验符")
+            builder.header("Range", "bytes=$requestedStart-$requestedEnd")
+            if (!validator.isNullOrBlank()) builder.header("If-Range", validator)
         } else {
             // 整文件单连接：明确关掉 gzip，否则拿到的是解压后的流，长度对不上。
             builder.header("Accept-Encoding", "identity")
@@ -937,6 +1006,7 @@ class ApkDownloadManager @Inject constructor(private val app: Application) {
 
         val call = clientFor(chunk.readTimeoutMs).newCall(builder.build())
         calls[index] = call
+        val stopping = cancellationWatcher(call)
         try {
             call.execute().use { response ->
                 if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
@@ -944,6 +1014,18 @@ class ApkDownloadManager @Inject constructor(private val app: Application) {
                     throw NotResumableException("服务器忽略了 Range（HTTP ${response.code}）")
                 }
                 val body = response.body ?: throw IOException("响应为空")
+                if (response.header("Content-Encoding")?.let { !it.equals("identity", true) } == true) {
+                    throw NotResumableException("Unexpected APK content encoding")
+                }
+                if (rec.rangeSupported) {
+                    val range = StageStore.parseContentRange(response.header("Content-Range"))
+                    if (range == null || range.start != requestedStart || range.end != requestedEnd ||
+                        range.total != rec.totalBytes || (body.contentLength() >= 0 && body.contentLength() != range.end - range.start + 1)) {
+                        throw NotResumableException("Unexpected APK Content-Range")
+                    }
+                    val etag = response.header("ETag")
+                    if (strongEtag(rec.etag) && etag != null && etag != rec.etag) throw NotResumableException("APK validator changed")
+                }
                 var written = 0L
                 FileOutputStream(file, have > 0L).use { out ->
                     body.byteStream().use { input ->
@@ -955,6 +1037,7 @@ class ApkDownloadManager @Inject constructor(private val app: Application) {
                             if (limit >= 0 && have + written >= limit) break
                             // 换源检测放在读循环里：每个 buffer 过一下 CAS 节流，
                             // 真正比对前缀最多每秒一次，发现不一致立刻抛。
+                            currentCoroutineContext().ensureActive()
                             checkProxy(rec)
                             val read = input.read(buffer)
                             if (read == -1) break
@@ -983,69 +1066,95 @@ class ApkDownloadManager @Inject constructor(private val app: Application) {
                 }
                 progress[index]?.set(expected)
             }
+        } catch (error: Exception) {
+            currentCoroutineContext().ensureActive(); throw error
         } finally {
+            stopping.cancel()
             calls.remove(index)
             lastActivity.remove(index)
         }
     }
+
+    private fun strongEtag(value: String?): Boolean = value != null && value.length >= 2 && value.startsWith('"') && value.endsWith('"')
+
+    private suspend fun cancellationWatcher(call: Call): Job = CoroutineScope(currentCoroutineContext())
+        .launch(Dispatchers.IO, start = CoroutineStart.UNDISPATCHED) {
+            try { awaitCancellation() } finally { call.cancel() }
+        }
 
     private fun checkProxy(rec: Record) {
         val now = SystemClock.elapsedRealtime()
         val last = proxyCheckedAt.get()
         if (now - last < PROXY_CHECK_INTERVAL_MS) return
         if (!proxyCheckedAt.compareAndSet(last, now)) return
-        if (GithubProxy.currentPrefix() != rec.proxyPrefix) throw ProxyChangedException()
+        if (proxyPrefix() != rec.proxyPrefix) throw ProxyChangedException()
     }
 
     /** 所有分片到齐：拼成单个 APK、校验长度、清分片。 */
-    private fun finish(rec: Record, token: Int) {
+    private suspend fun finish(rec: Record, token: Int) {
         if (token != runToken) return
         // 先切到「合并中」再动手：拼装是纯磁盘操作，这期间没有进度可报，
         // 不给状态的话界面就停在 99% 上，看着像卡死。
         publish(rec, Phase.MERGING, downloaded = rec.totalBytes)
         try {
             val startedAt = SystemClock.elapsedRealtime()
-            val apk = assemble(rec) ?: throw IOException("拼装失败")
+            val apk = phases().run("apk", "merge", "apk-output:" + apkFile()?.absolutePath, Pool.COPY,
+                gson.toJson(mapOf("tag" to rec.tag, "url" to rec.url))) {
+                val output = assemble(rec) ?: throw IOException("拼装失败")
+                withContext(NonCancellable) {
+                    rec.status = STATUS_COMPLETED
+                    rec.bannerPending = !sheetAttached
+                    saveRecord(rec) // the parent receipt commits before recoverable parts are removed
+                    deleteParts(rec)
+                }
+                output
+            }
             Timber.tag(TAG).i("拼装完成：%d 字节，耗时 %dms", apk.length(), SystemClock.elapsedRealtime() - startedAt)
-            rec.status = STATUS_COMPLETED
-            rec.bannerPending = !sheetAttached
-            saveRecord(rec)
             publish(rec, Phase.COMPLETED, downloaded = apk.length())
             if (rec.bannerPending) banner.markPending()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             Timber.tag(TAG).e(e, "拼装 APK 失败")
-            fail(rec, Reason.IO, resumable = false)
+            fail(rec, Reason.IO, resumable = rec.rangeSupported && partsExist(rec))
         }
     }
 
-    private fun assemble(rec: Record): File? {
+    private suspend fun assemble(rec: Record): File? {
         val out = apkFile() ?: return null
-        if (out.exists()) out.delete()
-        // 抢片会把新片追加在表尾，表序不等于偏移序，必须按 start 排序拼。
+        val temporary = File(out.parentFile, out.name + ".merging")
         val order = rec.segments.indices.sortedBy { rec.segments[it].start }
-        // 1MB 一块：64KB 时 45MB 要 700 多次 write，每次都过一层外置存储的 FUSE，
-        // 真机上能差出好几百毫秒。
-        FileOutputStream(out).use { sink ->
-            order.forEach { i ->
-                val part = partFile(rec, i) ?: return@forEach
-                if (!part.exists()) throw IOException("分片 $i 丢失")
-                FileInputStream(part).use { input -> input.copyTo(sink, ASSEMBLE_BUFFER_SIZE) }
+        try {
+            FileOutputStream(temporary).use { sink ->
+                val buffer = ByteArray(ASSEMBLE_BUFFER_SIZE)
+                for (i in order) {
+                    val part = partFile(rec, i) ?: throw IOException("分片 $i 丢失")
+                    FileInputStream(part).use { input ->
+                        while (true) {
+                            currentCoroutineContext().ensureActive()
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            sink.write(buffer, 0, count)
+                        }
+                    }
+                }
+                sink.fd.sync()
             }
-        }
-        val length = out.length()
-        if (rec.totalBytes > 0L && length != rec.totalBytes) {
-            out.delete()
-            throw IOException("拼装后长度不符：$length != ${rec.totalBytes}")
-        }
-        deleteParts(rec)
-        return out
+            val length = temporary.length()
+            if (length <= 0 || (rec.totalBytes > 0L && length != rec.totalBytes)) {
+                throw IOException("拼装后长度不符：$length != ${rec.totalBytes}")
+            }
+            currentCoroutineContext().ensureActive()
+            if (!temporary.renameTo(out)) throw IOException("Cannot commit assembled APK")
+            return out
+        } finally { temporary.delete() }
     }
 
     private fun fail(rec: Record, reason: Reason, resumable: Boolean) {
         abortCalls()
         val downloaded = downloadedOf(rec)
         rec.status = STATUS_FAILED
-        saveRecord(rec)
+        runCatching { saveRecord(rec) }.onFailure { Timber.tag(TAG).e(it, "Cannot persist failed APK parent") }
         if (!resumable) deleteParts(rec)
         publish(
             rec,
@@ -1061,7 +1170,7 @@ class ApkDownloadManager @Inject constructor(private val app: Application) {
         abortCalls()
         deleteParts(rec)
         rec.status = STATUS_FAILED
-        saveRecord(rec)
+        runCatching { saveRecord(rec) }.onFailure { Timber.tag(TAG).e(it, "Cannot persist failed APK parent") }
         publish(rec, Phase.FAILED, downloaded = 0L, resumable = false, reason = Reason.PROXY_CHANGED)
     }
 
@@ -1113,31 +1222,39 @@ class ApkDownloadManager @Inject constructor(private val app: Application) {
         }
     }
 
-    private fun deleteAllFiles() {
+    private fun deleteAllFiles(strict: Boolean = false) {
         dir()?.listFiles()?.forEach { file ->
-            if (file.name.startsWith(APK_FILE_NAME)) file.delete()
+            if (file.name.startsWith(APK_FILE_NAME) && !file.delete() && strict) {
+                throw IOException("Cannot retire previous APK bytes: ${file.name}")
+            }
         }
     }
 
     private fun dir(): File? =
-        app.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: app.filesDir
+        environment?.directory ?: app.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: app.filesDir
 
     private fun loadRecord(): Record? {
-        val raw = runCatching { MMKV.defaultMMKV().decodeString(KEY_RECORD, "") }.getOrNull()
+        val dependency = environment
+        val raw = runCatching { if (dependency != null) dependency.records.read() else MMKV.defaultMMKV().decodeString(KEY_RECORD, "") }.getOrNull()
         if (raw.isNullOrBlank()) return null
         val rec = runCatching { gson.fromJson(raw, Record::class.java) }.getOrNull() ?: return null
         // Gson 反序列化出来的是 ArrayList；换回写时复制表，抢片时才敢边追加边读。
-        rec.segments = CopyOnWriteArrayList(rec.segments)
+        val chunks = runCatching { rec.segments.toList() }.getOrNull() ?: return null
+        // Gson's Unsafe allocation does not execute the transient field initializer.
+        // A restored chunk must not acquire a zero (= infinite) socket timeout.
+        chunks.forEach { it.readTimeoutMs = BASE_READ_TIMEOUT_MS }
+        rec.segments = CopyOnWriteArrayList(chunks)
         return rec
     }
 
     private fun saveRecord(rec: Record) {
-        runCatching { MMKV.defaultMMKV().encode(KEY_RECORD, gson.toJson(rec)) }
-            .onFailure { Timber.tag(TAG).w(it, "保存下载记录失败") }
+        val raw = gson.toJson(rec)
+        val accepted = environment?.records?.write(raw) ?: MMKV.defaultMMKV().encode(KEY_RECORD, raw)
+        if (!accepted) throw IOException("Cannot persist APK parent record")
     }
 
     private fun clearRecord() {
-        runCatching { MMKV.defaultMMKV().removeValueForKey(KEY_RECORD) }
+        runCatching { environment?.records?.let { it.clear() } ?: MMKV.defaultMMKV().removeValueForKey(KEY_RECORD) }
         cachedReleaseJson = null
         cachedRelease = null
     }
@@ -1150,3 +1267,4 @@ class ApkDownloadManager @Inject constructor(private val app: Application) {
         return parsed
     }
 }
+

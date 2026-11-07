@@ -96,21 +96,15 @@ class SnapshotPathSafetyTest {
     // ---------- SnapshotArchive ----------
 
     @Test
-    fun `unzip drops traversal segments instead of writing outside target`() {
+    fun `unzip rejects traversal aliases without writing outside target`() {
         val target = temp.newFolder("out")
-        val zip = zipOf(
-            "../escaped.txt" to "nope",
-            "a/../../escaped2.txt" to "nope",
-            "images/p0.jpg" to "ok",
-        )
-        SnapshotArchive.unzip(ByteArrayInputStream(zip), target)
-
+        val zip = zipOf("../escaped.txt" to "nope", "images/p0.jpg" to "ok")
+        var rejected = false
+        try { SnapshotArchive.unzip(ByteArrayInputStream(zip), target) }
+        catch (expected: SnapshotException) { rejected = true }
+        assertTrue(rejected)
         assertFalse(File(target.parentFile, "escaped.txt").exists())
-        assertFalse(File(target.parentFile, "escaped2.txt").exists())
-        // `..` 段被剥掉后条目落在目标目录内，而不是被静默丢弃。
-        assertEquals("nope", File(target, "escaped.txt").readText())
-        assertEquals("nope", File(target, "a/escaped2.txt").readText())
-        assertEquals("ok", File(target, "images/p0.jpg").readText())
+        assertFalse(File(target, "escaped.txt").exists())
     }
 
     @Test
@@ -118,6 +112,27 @@ class SnapshotPathSafetyTest {
         val target = temp.newFolder("out")
         SnapshotArchive.unzip(ByteArrayInputStream(zipOf("images\\p1.jpg" to "ok")), target)
         assertEquals("ok", File(target, "images/p1.jpg").readText())
+    }
+
+    @Test
+    fun `normalized duplicate entries cannot overwrite an earlier file`() {
+        val target = temp.newFolder("duplicates")
+        val zip = zipOf("images/p0.jpg" to "first", "images//p0.jpg" to "second")
+        var rejected = false
+        try { SnapshotArchive.unzip(ByteArrayInputStream(zip), target) }
+        catch (expected: SnapshotException) { rejected = true }
+        assertTrue(rejected); assertEquals("first", File(target, "images/p0.jpg").readText())
+    }
+
+    @Test
+    fun `archive extraction checks cancellation while streaming a large entry`() {
+        val target = temp.newFolder("cancelled")
+        val zip = zipOf("large.bin" to "data".repeat(50_000))
+        var checks = 0; var cancelled = false
+        try { SnapshotArchive.unzip(ByteArrayInputStream(zip), target) {
+            if (++checks == 4) throw kotlinx.coroutines.CancellationException("stop")
+        } } catch (expected: kotlinx.coroutines.CancellationException) { cancelled = true }
+        assertTrue(cancelled); assertTrue(File(target, "large.bin").length() < 200_000)
     }
 
     @Test
@@ -169,3 +184,4 @@ class SnapshotPathSafetyTest {
         return out.toByteArray()
     }
 }
+

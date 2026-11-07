@@ -80,12 +80,9 @@ public class SAFactory implements DownloadFileFactory {
     @Override
     public void finishWrite() {
         if (mSettled) return;
+        // Leave abort cleanup available when the provider rejects the visibility commit.
+        mOnFinish.invoke();
         mSettled = true;
-        try {
-            mOnFinish.invoke();
-        } catch (Exception e) {
-            android.util.Log.w("SAFactory", "finishWrite failed: " + e.getMessage());
-        }
     }
 
     @Override
@@ -118,3 +115,4 @@ public class SAFactory implements DownloadFileFactory {
         return mPlan.getOverwrite() == OverwritePolicy.Skip;
     }
 }
+

@@ -1,0 +1,32 @@
+name: Content IO inventory
+on:
+  push:
+    branches: [feat/unified-content-queue]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inventory:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inventory byte IO entry points
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, json
+          pattern = re.compile(r'openDerived\(|openRaw\(|openOutputStream\(|FileOutputStream\(|\.outputStream\(|newCall\(|downloadFile\(|saveToDownloadsScopedStorage\(|saveImageToGallery\(')
+          rows = []
+          for p in sorted(Path('app/src/main/java').rglob('*')):
+              if p.suffix not in ('.java', '.kt'): continue
+              for n, line in enumerate(p.read_text().splitlines(), 1):
+                  if pattern.search(line): rows.append({'path':str(p), 'line':n, 'code':line.strip()[:240]})
+          Path('content-io-inventory.json').write_text(json.dumps({'source':__import__('os').environ['GITHUB_SHA'], 'entries':rows}, ensure_ascii=False, indent=2))
+          for row in rows: print(json.dumps(row, ensure_ascii=False))
+          print('IO_ENTRY_COUNT',len(rows))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: content-io-inventory
+          path: content-io-inventory.json

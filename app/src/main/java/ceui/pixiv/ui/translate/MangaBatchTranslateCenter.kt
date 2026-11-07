@@ -138,7 +138,7 @@ class MangaBatchTranslateCenter @Inject constructor(
             if (entry.key == keep) continue
             val paths = entry.value.value.orEmpty().values.toList()
             entry.value.value = emptyMap()
-            scope.launch(Dispatchers.IO) { paths.forEach { runCatching { File(it).delete() } } }
+            scope.launch(Dispatchers.IO) { paths.forEach { runCatching { ceui.pixiv.download.copy.CopyInputReferences.requestDelete(File(it)) } } }
             Timber.d("MangaBatchTranslateCenter: evicted illust %d (%d files)", entry.key, paths.size)
             overFilled--
         }
@@ -163,7 +163,7 @@ class MangaBatchTranslateCenter @Inject constructor(
         val old = live.value?.get(pageIndex)
         live.value = live.value.orEmpty().toMutableMap().apply { put(pageIndex, newPath) }
         if (old != null && old != newPath) {
-            scope.launch(Dispatchers.IO) { runCatching { File(old).delete() } }
+            scope.launch(Dispatchers.IO) { runCatching { ceui.pixiv.download.copy.CopyInputReferences.requestDelete(File(old)) } }
         }
     }
 
@@ -290,3 +290,4 @@ class MangaBatchTranslateCenter @Inject constructor(
         }
     }
 }
+

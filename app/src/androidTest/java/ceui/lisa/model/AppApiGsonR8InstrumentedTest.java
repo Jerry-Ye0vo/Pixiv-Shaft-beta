@@ -1,6 +1,7 @@
 package ceui.lisa.model;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
@@ -25,6 +26,8 @@ import java.util.List;
 import java.util.Map;
 
 import ceui.lisa.core.DownloadItem;
+import ceui.pixiv.download.copy.CopyIntent;
+import ceui.pixiv.download.queue.ContentPhaseRunner;
 import ceui.pixiv.api.API;
 import ceui.pixiv.api.model.Illust;
 import ceui.pixiv.cache.ObjectPool;
@@ -53,6 +56,176 @@ import retrofit2.http.GET;
 /** Guards App API wire fields and Retrofit response signatures in the minified release APK. */
 @RunWith(AndroidJUnit4.class)
 public final class AppApiGsonR8InstrumentedTest {
+
+    @Test
+    public void localOutputIntentKeepsItsFrozenTextSourceAndDestinationInRelease() throws Exception {
+        Object request = parseWire(ceui.pixiv.download.copy.LocalOutputRequest.class,
+                "{\"version\":1,\"type\":\"caption\",\"subjectId\":123,\"destination\":{\"storage\":\"cache\",\"segments\":[\"frozen.txt\"],\"mime\":\"text/plain\",\"policy\":\"Rename\"},\"contextJson\":\"{}\",\"content\":\"frozen text\",\"sourceBytes\":42,\"sourceModified\":12345,\"producer\":\"preparation-token\",\"asVideo\":false}");
+        JSONObject frozen = new JSONObject(encodeWire(request));
+        assertEquals("caption", frozen.getString("type"));
+        assertEquals(123L, frozen.getLong("subjectId"));
+        assertEquals("frozen text", frozen.getString("content"));
+        assertEquals("frozen.txt", frozen.getJSONObject("destination").getJSONArray("segments").getString(0));
+        assertEquals("preparation-token", frozen.getString("producer"));
+    }
+
+    @Test
+    public void novelGroupCheckpointKeepsFrozenChaptersAndOutputOwnershipInRelease() {
+        String json = "{\"parts\":[{\"detail\":null,\"novels\":[\"chapter-json\"],\"listed\":true,\"pages\":1,\"next\":1,\"chapters\":[{\"title\":\"Chapter\",\"text\":\"Frozen body\",\"webJson\":null,\"txtHeader\":\"第1章 Chapter\",\"txtSubtitle\":null}],\"skipped\":0,\"output\":\"plan:child\",\"written\":true}],\"selectedFormat\":\"Epub\",\"awaitingFormat\":false,\"success\":1,\"skipped\":0,\"chapters\":1,\"complete\":true}";
+        Gson gson = new Gson();
+        ceui.pixiv.ui.novel.reader.export.NovelGroupState state = gson.fromJson(json,
+                ceui.pixiv.ui.novel.reader.export.NovelGroupState.class);
+        assertEquals("Frozen body", state.getParts().get(0).getChapters().get(0).getText());
+        assertEquals("plan:child", state.getParts().get(0).getOutput());
+        assertEquals("Epub", state.getSelectedFormat());
+        assertTrue(gson.toJson(state).contains("\"txtHeader\""));
+    }
+    @Test
+    public void imageDerivativeRecipeKeepsItsFrozenSourceAndFilterInRelease() throws Exception {
+        Object recipe = parseWire(ceui.pixiv.download.copy.ImageDerivativeState.class,
+                "{\"version\":1,\"sourceHash\":\"frozen-sha\",\"sourceBytes\":123,\"avatarAttempted\":true,\"mime\":\"image/png\"}");
+        JSONObject saved = new JSONObject(encodeWire(recipe));
+        assertEquals("frozen-sha", saved.getString("sourceHash"));
+        assertEquals(123L, saved.getLong("sourceBytes"));
+        assertEquals("image/png", saved.getString("mime"));
+    }
+    @Test
+    public void readerFontIntentKeepsItsAcceptedChecksumAndOriginalFontId() throws Exception {
+        Object intent = parseWire(ceui.pixiv.ui.novel.reader.settings.ReaderFontRequest.class,
+                "{\"version\":1,\"fontId\":\"web_noto_sans_sc\",\"url\":\"https://example/font.ttf\",\"bytes\":1234,\"sha256\":\"accepted-hash\",\"delete\":false}");
+        JSONObject frozen = new JSONObject(encodeWire(intent));
+        assertEquals("web_noto_sans_sc", frozen.getString("fontId"));
+        assertEquals("accepted-hash", frozen.getString("sha256"));
+        assertEquals(1234L, frozen.getLong("bytes"));
+    }
+    @Test
+    public void selectedFrameReceiptsKeepOriginalInputsAndOwnedChildIds() throws Exception {
+        Object checkpoint = parseWire(ceui.pixiv.ui.detail.frames.FrameExportState.class,
+                "{\"version\":1,\"inputs\":[{\"name\":\"0.jpg\",\"bytes\":123,\"sha256\":\"frozen\"}],\"outputs\":[{\"uri\":\"content://images/1\",\"mime\":\"image/jpeg\",\"skipped\":false,\"child\":\"plan:owned-child\"}],\"video\":false,\"complete\":true}");
+        JSONObject saved = new JSONObject(encodeWire(checkpoint));
+        assertEquals("0.jpg", saved.getJSONArray("inputs").getJSONObject(0).getString("name"));
+        assertEquals("plan:owned-child", saved.getJSONArray("outputs").getJSONObject(0).getString("child"));
+        assertTrue(saved.getBoolean("complete"));
+    }
+
+    @Test
+    public void snapshotManagementIntentAndValidatedInputKeepTheirSchemaInRelease() throws Exception {
+        Object request = parseWire(ceui.pixiv.snapshot.SnapshotOperationRequest.class,
+                "{\"version\":1,\"operation\":\"export\",\"snapshotId\":\"snapshot-123\",\"uri\":\"content://documents/output/1\",\"fileName\":\"frozen.shaftsnap\",\"manifestHash\":\"hash\"}");
+        JSONObject frozen = new JSONObject(encodeWire(request));
+        assertEquals("export", frozen.getString("operation"));
+        assertEquals("content://documents/output/1", frozen.getString("uri"));
+        assertEquals("frozen.shaftsnap", frozen.getString("fileName"));
+        Object checkpoint = parseWire(ceui.pixiv.snapshot.SnapshotOperationState.class,
+                "{\"version\":1,\"manifestJson\":\"{}\",\"files\":{\"images/p0.jpg\":{\"identity\":\"import\",\"bytes\":123,\"sha256\":\"hash\"}},\"prepared\":true,\"existed\":true}");
+        JSONObject saved = new JSONObject(encodeWire(checkpoint));
+        assertTrue(saved.getBoolean("prepared"));
+        assertTrue(saved.getBoolean("existed"));
+        assertEquals(123L, saved.getJSONObject("files").getJSONObject("images/p0.jpg").getLong("bytes"));
+    }
+
+    @Test
+    public void snapshotParentResourcesAndFrozenIdentityKeepTheirSchemaInRelease() throws Exception {
+        Object request = parseWire(ceui.pixiv.snapshot.SnapshotRequest.class,
+                "{\"version\":1,\"snapshotId\":\"12345678-1234-1234-1234-123456789abc\",\"createdAt\":12345,\"illustJson\":\"{}\",\"comments\":true,\"original\":true,\"fresh\":true,\"automatic\":false}");
+        JSONObject frozen = new JSONObject(encodeWire(request));
+        assertEquals(12345L, frozen.getLong("createdAt"));
+        assertTrue(frozen.getBoolean("original"));
+        assertEquals("12345678-1234-1234-1234-123456789abc", frozen.getString("snapshotId"));
+        Object checkpoint = parseWire(ceui.pixiv.snapshot.SnapshotCheckpoint.class,
+                "{\"version\":1,\"beanJson\":\"{}\",\"resources\":{\"images/p0.jpg\":{\"identity\":\"url:source\",\"bytes\":42,\"sha256\":\"hash\"}},\"directories\":[\"ugoira/\"],\"manifestJson\":\"frozen-manifest\"}");
+        JSONObject saved = new JSONObject(encodeWire(checkpoint));
+        assertEquals(42L, saved.getJSONObject("resources").getJSONObject("images/p0.jpg").getLong("bytes"));
+        assertEquals("hash", saved.getJSONObject("resources").getJSONObject("images/p0.jpg").getString("sha256"));
+        assertEquals("ugoira/", saved.getJSONArray("directories").getString(0));
+        assertEquals("frozen-manifest", saved.getString("manifestJson"));
+    }
+
+    @Test
+    public void ugoiraParentKeepsFrozenDestinationsAndActualFormatReceiptInRelease() throws Exception {
+        Object request = parseWire(ceui.pixiv.ui.bulk.UgoiraSaveRequest.class,
+                "{\"version\":1,\"illustJson\":\"{}\",\"preferVideo\":true,\"gif\":{\"storage\":\"cache\",\"segments\":[\"frozen.gif\"],\"mime\":\"image/gif\",\"policy\":\"Rename\"},\"video\":{\"storage\":\"cache\",\"segments\":[\"frozen.mp4\"],\"mime\":\"video/mp4\",\"policy\":\"Rename\"}}");
+        JSONObject frozen = new JSONObject(encodeWire(request));
+        assertTrue(frozen.getBoolean("preferVideo"));
+        assertEquals("frozen.gif", frozen.getJSONObject("gif").getJSONArray("segments").getString(0));
+        assertEquals("video/mp4", frozen.getJSONObject("video").getString("mime"));
+        Object actual = parseWire(ceui.pixiv.ui.bulk.UgoiraSaveDomain.class,
+                "{\"version\":1,\"video\":false,\"metadataJson\":\"frozen-metadata\"}");
+        JSONObject receipt = new JSONObject(encodeWire(actual));
+        assertFalse(receipt.getBoolean("video"));
+        assertEquals("frozen-metadata", receipt.getString("metadataJson"));
+    }
+
+    @Test
+    public void novelExportTokensAndArtifactReceiptsKeepTheirSchemaInRelease() throws Exception {
+        Object request = parseWire(ceui.pixiv.ui.novel.reader.export.NovelExportRequest.class,
+                "{\"version\":1,\"format\":\"Txt\",\"novelId\":123,\"tokens\":[{\"type\":\"paragraph\",\"start\":0,\"end\":4,\"text\":\"body\",\"id\":0,\"page\":0}],\"destination\":{\"storage\":\"cache\",\"segments\":[\"book.txt\"],\"mime\":\"text/plain\",\"policy\":\"Rename\"},\"header\":\"frozen\",\"legacyTxt\":false,\"retryMode\":\"auto\"}");
+        JSONObject frozen = new JSONObject(encodeWire(request));
+        assertEquals(123L, frozen.getLong("novelId"));
+        assertEquals("paragraph", frozen.getJSONArray("tokens").getJSONObject(0).getString("type"));
+        assertEquals("body", frozen.getJSONArray("tokens").getJSONObject(0).getString("text"));
+        assertEquals("frozen", frozen.getString("header"));
+        Object receipt = parseWire(ceui.pixiv.download.queue.ArtifactCheckpoint.class,
+                "{\"version\":1,\"bytes\":123,\"sha256\":\"hash\",\"receipt\":\"content://output/1\",\"skipped\":false,\"outputCommitted\":true,\"domain\":\"checkpoint\"}");
+        JSONObject saved = new JSONObject(encodeWire(receipt));
+        assertEquals("content://output/1", saved.getString("receipt"));
+        assertEquals("hash", saved.getString("sha256"));
+        assertTrue(saved.getBoolean("outputCommitted"));
+    }
+
+    @Test
+    public void modelParentAndInstallationReceiptsKeepTheirSchemaInRelease() throws Exception {
+        Object request = parseWire(ceui.pixiv.download.model.ModelRequest.class,
+                "{\"version\":1,\"directory\":\"rife-models\",\"asset\":\"rife\",\"required\":[\"model.onnx\"],\"operation\":\"download\",\"source\":\"https://example.com/model.zip\",\"timeoutSeconds\":120}");
+        JSONObject frozen = new JSONObject(encodeWire(request));
+        assertEquals("rife-models", frozen.getString("directory"));
+        assertEquals("model.onnx", frozen.getJSONArray("required").getString(0));
+        assertEquals(120L, frozen.getLong("timeoutSeconds"));
+        Object receipt = parseWire(ceui.pixiv.download.model.ModelInstallReceipt.class,
+                "{\"version\":1,\"plan\":\"plan:test\",\"request\":\"request-hash\",\"source\":\"source-hash\",\"files\":[{\"path\":\"model.onnx\",\"length\":123,\"sha256\":\"file-hash\"}]}");
+        JSONObject saved = new JSONObject(encodeWire(receipt));
+        assertEquals("plan:test", saved.getString("plan"));
+        assertEquals(123L, saved.getJSONArray("files").getJSONObject(0).getLong("length"));
+        assertEquals("file-hash", saved.getJSONArray("files").getJSONObject(0).getString("sha256"));
+        Object checkpoint = parseWire(ceui.pixiv.download.model.ModelCheckpoint.class,
+                "{\"version\":1,\"length\":123,\"sha256\":\"source-hash\",\"invalid\":true}");
+        assertTrue(new JSONObject(encodeWire(checkpoint)).getBoolean("invalid"));
+    }
+
+    @Test
+    public void unifiedDownloadV1InputsAndReceiptsKeepTheirPersistedSchemaInRelease() throws Exception {
+        Object intent = parseWire(CopyIntent.class, """
+                {"version":1,"request":{"kind":"translation","subjectId":123,"page":2,
+                  "sourcePath":"/data/local/tmp/translated.png","sourceSize":123,"sourceModified":456,
+                  "contextJson":"{}","submittedAt":789,"destination":{"storage":"cache",
+                    "segments":["translated.png"],"mime":"image/png","policy":"Rename"}},
+                  "snapshotName":"owned.source","sourceHash":"sha256","sourceBytes":123,
+                  "receiptUri":"content://media/external/images/media/123","skipped":false,"outputCommitted":true}
+                """);
+        assertEquals(1, wireField(intent, "version"));
+        Object request = wireField(intent, "request");
+        assertEquals(123L, wireField(request, "subjectId"));
+        assertEquals(2, wireField(request, "page"));
+        Object destination = wireField(request, "destination");
+        assertEquals("cache", wireField(destination, "storage"));
+        assertEquals("Rename", wireField(destination, "policy"));
+        assertEquals("translated.png", ((List<?>) wireField(destination, "segments")).get(0));
+        JSONObject persisted = new JSONObject(encodeWire(intent));
+        assertEquals("sha256", persisted.getString("sourceHash"));
+        assertEquals(123L, persisted.getLong("sourceBytes"));
+        assertTrue(persisted.getBoolean("outputCommitted"));
+        assertEquals("image/png", persisted.getJSONObject("request").getJSONObject("destination").getString("mime"));
+        Object restored = parseWire(CopyIntent.class, persisted.toString());
+        assertEquals("content://media/external/images/media/123", wireField(restored, "receiptUri"));
+
+        Object phase = parseWire(ContentPhaseRunner.Intent.class,
+                "{\"version\":1,\"owner\":\"ugoira\",\"phase\":\"zip\",\"resource\":\"target\",\"context\":\"{}\",\"submittedAt\":42}");
+        JSONObject phaseJson = new JSONObject(encodeWire(phase));
+        assertEquals("ugoira", phaseJson.getString("owner"));
+        assertEquals("zip", phaseJson.getString("phase"));
+        assertEquals("target", phaseJson.getString("resource"));
+        assertEquals(42L, phaseJson.getLong("submittedAt"));
+    }
 
     @Test
     public void listIllustWireFieldsSurviveR8() throws Exception {
@@ -326,3 +499,4 @@ public final class AppApiGsonR8InstrumentedTest {
         return lowerBounds.length == 1 ? lowerBounds[0] : wildcard.getUpperBounds()[0];
     }
 }
+

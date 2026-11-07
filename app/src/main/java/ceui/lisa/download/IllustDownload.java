@@ -101,9 +101,8 @@ public class IllustDownload {
             if (illust.getPage_count() == 1) {
                 IllustCaptionExporter.export(illust);
                 DownloadItem item = buildDownloadItem(illust, 0, imageResolution);
-                DownloadToasts.show(DownloadToastKind.ENQUEUED,
-                        '1' + Shaft.getContext().getString(R.string.has_been_added));
-                Manager.get().addTask(item);
+                Manager.get().addTask(item, () -> DownloadToasts.show(DownloadToastKind.ENQUEUED,
+                        '1' + Shaft.getContext().getString(R.string.has_been_added)));
                 trackDownload(illust, 1);
             }
         });
@@ -122,9 +121,8 @@ public class IllustDownload {
         if (illust.getPage_count() == 1) {
             IllustCaptionExporter.export(illust);
             DownloadItem item = buildDownloadItem(illust, 0, imageResolution);
-            DownloadToasts.show(DownloadToastKind.ENQUEUED,
-                    '1' + Shaft.getContext().getString(R.string.has_been_added));
-            Manager.get().addTask(item);
+            Manager.get().addTask(item, () -> DownloadToasts.show(DownloadToastKind.ENQUEUED,
+                    '1' + Shaft.getContext().getString(R.string.has_been_added)));
             trackDownload(illust, 1);
         }
     }
@@ -137,9 +135,8 @@ public class IllustDownload {
             } else {
                 IllustCaptionExporter.export(illust);
                 DownloadItem item = buildDownloadItem(illust, index);
-                DownloadToasts.show(DownloadToastKind.ENQUEUED,
-                        '1' + Shaft.getContext().getString(R.string.has_been_added));
-                Manager.get().addTask(item);
+                Manager.get().addTask(item, () -> DownloadToasts.show(DownloadToastKind.ENQUEUED,
+                        '1' + Shaft.getContext().getString(R.string.has_been_added)));
                 trackDownload(illust, 1);
             }
         });
@@ -184,10 +181,10 @@ public class IllustDownload {
             return;
         }
         IllustCaptionExporter.export(illust);
-        Manager.get().addTasks(items); // Atomic URL dedup also covers a concurrent whole-work enqueue.
+        Manager.get().addTasks(items, () -> DownloadToasts.show(DownloadToastKind.ENQUEUED,
+                Shaft.getContext().getString(R.string.page_download_submitted,
+                        items.size(), unique.size() - items.size())));
         trackDownload(illust, items.size());
-        DownloadToasts.show(DownloadToastKind.ENQUEUED, Shaft.getContext().getString(
-                R.string.page_download_submitted, items.size(), unique.size() - items.size()));
     }
 
     /**
@@ -243,9 +240,8 @@ public class IllustDownload {
                 DownloadItem item = buildDownloadItem(illust, i, imageResolution);
                 tempList.add(item);
             }
-            DownloadToasts.show(DownloadToastKind.ENQUEUED,
-                    tempList.size() + Shaft.getContext().getString(R.string.has_been_added));
-            Manager.get().addTasks(tempList);
+            Manager.get().addTasks(tempList, () -> DownloadToasts.show(DownloadToastKind.ENQUEUED,
+                    tempList.size() + Shaft.getContext().getString(R.string.has_been_added)));
             trackDownload(illust, tempList.size());
         }
     }
@@ -296,7 +292,8 @@ public class IllustDownload {
         if (Shaft.sSettings != null && Shaft.sSettings.getDownloadLimitType() == 2) {
             item.setPaused(true);
         }
-        Manager.get().addTask(item);
+        if (autoSave) ceui.pixiv.ui.bulk.QueuedUgoira.get(Shaft.getContext()).enqueue(illust);
+        else Manager.get().addTask(item);
         return item;
     }
 
@@ -305,43 +302,7 @@ public class IllustDownload {
             return;
         }
         trackDownload(illustsBean, 1);
-        // 播放引擎可能已把这张 ugoira 的帧序列落盘(用户在详情页看过)。命中就直接由帧出片
-        // 拷进用户存储,跳过重下 zip / 重解压 / 重补帧 —— 也避开与引擎抢写同一批缓存文件的
-        // 无锁竞争。格式随「动图保存格式」设置:mp4 时播放缓存里那份直接就能用(纯拷贝),
-        // GIF 时现编。出片 + 拷贝都是阻塞的,一起放后台线程。未命中 / 失败都回退到原始
-        // 「下 zip→编码→保存」链路,行为不变。
-        JavaAsync.fireAndForget(() -> {
-            UgoiraEngine.UgoiraExport export = null;
-            try {
-                // 设置成 mp4 时:帧不在盘上就把整条播放 pipeline 跑完再出片 —— 下面那条老链路
-                // (getGifInfo → encodeGifV2)只会产 GIF,不这么做,没看过的动图会拿到 GIF。
-                export = Shaft.sSettings.isUgoiraSaveAsMp4()
-                        ? UgoiraEngine.INSTANCE.prepareAndExportForSave(illustsBean)
-                        : UgoiraEngine.INSTANCE.exportForSave(illustsBean);
-            } catch (Throwable t) {
-                t.printStackTrace();
-            }
-            if (export != null) {
-                try {
-                    OutPut.outPutUgoira(Shaft.getContext(), export.getFile(), illustsBean, export.isVideo());
-                    Common.showLog("[UGOIRA] downloadGif 复用播放引擎帧序列 id=" + illustsBean.getId()
-                            + " video=" + export.isVideo());
-                    return;
-                } catch (Throwable t) {
-                    t.printStackTrace(); // 复用失败 → 落到下面完整链路
-                } finally {
-                    // 只删「为这次保存而生」的临时文件;mp4 那份是播放缓存,删了下次还得重压
-                    if (export.getTemporary()) {
-                        //noinspection ResultOfMethodCallIgnored
-                        export.getFile().delete();
-                    }
-                }
-            }
-            PixivOperate.getGifInfo(illustsBean, gifResponse -> {
-                JavaAsync.fireAndForget(() -> UgoiraMetadataCache.put(illustsBean.getId(), gifResponse));
-                downloadGif(gifResponse, illustsBean, true);
-            });
-        });
+        ceui.pixiv.ui.bulk.QueuedUgoira.get(Shaft.getContext()).enqueue(illustsBean);
     }
 
     /**
@@ -378,19 +339,15 @@ public class IllustDownload {
         // try/catch 里,异步化后不能让这些异常变成工作线程未捕获异常 / 主线程崩溃
         check(activity, () -> BACKUP_EXECUTOR.execute(() -> {
             try {
-                File textFile = LegacyFile.textFile(activity, displayName);
-                boolean written = false;
-                try {
-                    fileWriter.doSomething(textFile);
-                    Common.showLog("downloadBackupFile displayName " + textFile.getName());
-                    written = OutPut.outPutBackupFile(activity, textFile, displayName);
-                } catch (Exception e) {
-                    // 序列化 / 写临时文件本身失败:OutPut 没机会报错,这里补一条
-                    e.printStackTrace();
-                    Common.showToast(Shaft.getContext().getString(R.string.save_backup_failed,
-                            e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
-                }
+                ceui.pixiv.download.copy.LocalOutputSubmission submission =
+                        ceui.pixiv.download.copy.QueuedLocalOutputs.backup(activity.getApplicationContext(), displayName, fileWriter::doSomething);
+                boolean written = ceui.pixiv.download.copy.QueuedLocalOutputs.awaitBlocking(
+                        activity.getApplicationContext(), submission.getTicket());
+                File textFile = submission.getShareFile();
                 if (!written) {
+                    String error = submission.getTicket().getStatus().getValue().getError();
+                    Common.showToast(Shaft.getContext().getString(R.string.save_backup_failed,
+                            error != null ? error : "请在下载队列中查看失败原因"));
                     // 没写进用户存储就不回调 targetCallback —— 否则调用方会 toast「备份成功」
                     // (真机复现:全部恢复默认后备份落到相册卷被 MediaStore 拒掉,却仍提示成功)
                     return;
@@ -555,3 +512,5 @@ public class IllustDownload {
         }
     }
 }
+
+

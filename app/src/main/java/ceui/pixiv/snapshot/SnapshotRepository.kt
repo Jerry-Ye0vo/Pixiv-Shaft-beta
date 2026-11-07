@@ -119,16 +119,19 @@ object SnapshotRepository {
     fun readManifest(context: Context, snapshotId: String): SnapshotManifest? =
         SnapshotValidator.readJson(File(dir(context, snapshotId), SNAPSHOT_MANIFEST))
 
+    /** Synchronous compatibility API; existing UI callers already invoke it on Dispatchers.IO. */
     fun delete(context: Context, snapshotId: String): Boolean {
-        val target = dir(context, snapshotId)
-        val ok = if (target.isDirectory) target.deleteRecursively() else false
-        if (ok) {
-            SnapshotRuntimeCache.remove(snapshotId)
-            // 删掉之后卡片上那枚快照标记必须跟着消失：这是**唯一**的删除口，管理页单删/批删、
-            // 自动快照配额淘汰、导入替换失败回滚都从这里走。
-            SnapshotIndex.onSnapshotDeleted(snapshotId)
+        dir(context, snapshotId) // validate before admission, retaining the old path error contract
+        return try {
+            kotlinx.coroutines.runBlocking(Dispatchers.IO) {
+                val operations = QueuedSnapshotOperations.get(context)
+                operations.await(operations.enqueue(SnapshotOperationRequest(operation = QueuedSnapshotOperations.DELETE,
+                    snapshotId = snapshotId))).existed
+            }
+        } catch (failed: Exception) {
+            timber.log.Timber.w(failed, "Snapshot deletion failed")
+            false
         }
-        return ok
     }
 
     fun loadViewerData(context: Context, snapshotId: String): SnapshotViewerData {
@@ -156,99 +159,31 @@ object SnapshotRepository {
         return SnapshotViewerData(snapshotDir, manifest, illust, assets, comments, ugoiraFrames)
     }
 
-    suspend fun export(context: Context, snapshotId: String, uri: Uri) = withContext(Dispatchers.IO) {
-        val snapshotDir = dir(context, snapshotId)
-        if (!snapshotDir.isDirectory) throw SnapshotException("快照不存在: $snapshotId")
-        val out = context.contentResolver.openOutputStream(uri)
-            ?: throw SnapshotException("无法打开导出位置")
-        out.use { SnapshotArchive.zipDirectory(snapshotDir, it) }
+    suspend fun export(context: Context, snapshotId: String, uri: Uri): Unit = withContext(Dispatchers.IO) {
+        val manifest = readManifest(context, snapshotId) ?: throw SnapshotException("快照不存在: $snapshotId")
+        val hash = ceui.pixiv.download.queue.ArtifactPublisher.digest(File(dir(context, snapshotId), SNAPSHOT_MANIFEST))
+        val operations = QueuedSnapshotOperations.get(context)
+        operations.await(operations.enqueue(SnapshotOperationRequest(operation = QueuedSnapshotOperations.EXPORT,
+            snapshotId = snapshotId, uri = uri.toString(), fileName = manifest.safeExportFileName(), manifestHash = hash)))
+        Unit
     }
 
-    /** 批量导出到 SAF 目录：在所选文件夹里为每个快照创建一个 .shaftsnap 文件。 */
-    suspend fun exportToDirectory(context: Context, snapshotId: String, treeUri: Uri) =
-        withContext(Dispatchers.IO) {
-            val snapshotDir = dir(context, snapshotId)
-            if (!snapshotDir.isDirectory) throw SnapshotException("快照不存在: $snapshotId")
-            val manifest = readManifest(context, snapshotId)
-                ?: throw SnapshotException("快照 manifest 损坏: $snapshotId")
-            val parent = DocumentFile.fromTreeUri(context, treeUri)
-                ?: throw SnapshotException("无法打开所选文件夹")
-            val fileName = manifest.safeExportFileName()
-            val file = parent.createFile("application/zip", fileName)
-                ?: throw SnapshotException("无法在所选文件夹创建 $fileName")
-            val out = context.contentResolver.openOutputStream(file.uri)
-                ?: throw SnapshotException("无法写入 $fileName")
-            out.use { SnapshotArchive.zipDirectory(snapshotDir, it) }
-        }
+    suspend fun exportToDirectory(context: Context, snapshotId: String, treeUri: Uri): Unit = withContext(Dispatchers.IO) {
+        val manifest = readManifest(context, snapshotId) ?: throw SnapshotException("快照不存在: $snapshotId")
+        val hash = ceui.pixiv.download.queue.ArtifactPublisher.digest(File(dir(context, snapshotId), SNAPSHOT_MANIFEST))
+        val operations = QueuedSnapshotOperations.get(context)
+        operations.await(operations.enqueue(SnapshotOperationRequest(operation = QueuedSnapshotOperations.EXPORT_TREE,
+            snapshotId = snapshotId, tree = treeUri.toString(), fileName = manifest.safeExportFileName(), manifestHash = hash)))
+        Unit
+    }
 
     suspend fun import(context: Context, uri: Uri): SnapshotManifest = withContext(Dispatchers.IO) {
-        val staging = File(context.cacheDir, "snapshot_staging_${System.currentTimeMillis()}")
-        sweepStaleBackups(context)
-        try {
-            staging.mkdirs()
-            // 直接从 SAF 流解到 staging：先落一份完整 ZIP 到 cacheDir 再解，等于同一份数据
-            // 写两遍、峰值还要多占一个快照大小的可用空间(原图快照动辄几百 MB)，而 ZipInputStream
-            // 本来就是顺序读，落盘那一趟没有换来任何东西。
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                SnapshotArchive.unzip(input, staging)
-            } ?: throw SnapshotException("无法读取所选文件")
-            val manifest = SnapshotValidator.readJson<SnapshotManifest>(File(staging, SNAPSHOT_MANIFEST))
-                ?: throw SnapshotException("不是有效的 .shaftsnap 快照：缺少 manifest.json")
-            if (manifest.schemaVersion != SNAPSHOT_SCHEMA_VERSION) {
-                throw SnapshotException("不支持的快照版本: ${manifest.schemaVersion}")
-            }
-            requireSnapshotId(manifest.snapshotId)
-            SnapshotValidator.validate(staging, manifest)
-            val target = dir(context, manifest.snapshotId)
-            // 首次导入时快照库根目录还不存在(root() 刻意不建目录),不先建出来的话下面那次
-            // rename 必然失败、白白回落到全量拷贝。
-            root(context).mkdirs()
-            // 备份目录名带 BACKUP_PREFIX：合法快照 ID 只允许 [A-Za-z0-9_-]（见 requireSnapshotId），
-            // 所以带点前缀的名字永远不会与真快照目录撞车，也就永远不会被 list() 当成一张卡片。
-            val backup = File(target.parentFile, "$BACKUP_PREFIX${target.name}_${System.currentTimeMillis()}")
-            if (target.exists()) {
-                if (!target.renameTo(backup)) {
-                    throw SnapshotException("无法替换已有快照: ${manifest.snapshotId}")
-                }
-            }
-            try {
-                // cacheDir 与 filesDir 同在 app 数据目录下(同一挂载点),rename 就是改个目录项,
-                // 零字节拷贝。copyRecursively 等于把刚解压出来的这一份再写一遍 —— 几百 MB 的
-                // 原图快照会白白多花一倍时间、峰值还要多占一个快照大小的可用空间,正是
-                // 「导入不再先落一份完整 ZIP」那次要避免的同一件事。
-                // rename 失败(理论上的分区差异)再回落到老路子。
-                if (!staging.renameTo(target)) {
-                    target.mkdirs()
-                    staging.copyRecursively(target, overwrite = true)
-                }
-                backup.deleteRecursively()
-                SnapshotRuntimeCache.remove(manifest.snapshotId)
-                SnapshotIndex.onSnapshotWritten(manifest.illustId, manifest.snapshotId, isAuto = false, manifest.createdAt)
-                manifest
-            } catch (e: Exception) {
-                target.deleteRecursively()
-                if (backup.exists()) backup.renameTo(target)
-                throw e
-            }
-        } finally {
-            staging.deleteRecursively()
-        }
+        val operations = QueuedSnapshotOperations.get(context)
+        val result = operations.await(operations.enqueue(SnapshotOperationRequest(operation = QueuedSnapshotOperations.IMPORT,
+            snapshotId = null, uri = uri.toString())))
+        com.google.gson.Gson().fromJson(requireNotNull(result.manifestJson), SnapshotManifest::class.java)
     }
 
-    /**
-     * 清掉上一次导入没走完（进程被杀 / 掉电）留在库里的备份目录。
-     * 只在导入入口扫一次即可：它是唯一会产生备份目录的地方。
-     */
-    private fun sweepStaleBackups(context: Context) {
-        root(context).listFiles()
-            ?.filter { it.isDirectory && it.name.startsWith(BACKUP_PREFIX) }
-            ?.forEach { it.deleteRecursively() }
-    }
-
-    /**
-     * 老快照的 manifest 可能没记 R 级/页数；从快照自带的 illust.json 回补显示字段。
-     * 只影响列表展示、不落盘，避免在只读 list() 里产生写副作用。
-     */
     private fun SnapshotManifest.backfillDisplayFields(snapshotDir: File): SnapshotManifest {
         if (xRestrict != null && pageCount != null && pageCount > 0) return this
         val illust = SnapshotValidator.readJson<Illust>(File(snapshotDir, SNAPSHOT_ILLUST_JSON)) ?: return this
@@ -258,5 +193,5 @@ object SnapshotRepository {
         )
     }
 
-    private const val BACKUP_PREFIX = ".backup_"
 }
+

@@ -52,3 +52,4 @@ sealed class ExportResult {
     /** 目标已存在且覆盖策略是「已存在则跳过」：没写，但也不是失败。 */
     data class Skipped(val displayPath: String) : ExportResult()
 }
+

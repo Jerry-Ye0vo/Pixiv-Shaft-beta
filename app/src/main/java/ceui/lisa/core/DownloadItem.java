@@ -28,6 +28,10 @@ public class DownloadItem implements Serializable {
     //     postMain 体）和 IO worker（complete 失败时归零），读方在别的线程看日志。
     private volatile int state = DownloadState.INIT;
     private volatile boolean paused = false;
+    // JSON-only compatibility marker; no Room schema or completed-record format change.
+    private int queueRecordVersion;
+
+    public int getQueueRecordVersion() { return queueRecordVersion; }
     // 批量队列产生的 page 不逐条弹完成/失败 Toast，由队列收口时统一弹汇总（issue #950）。
     // 参与序列化：冷启动 Manager.restore 带回的批量 page 也要保持静默。
     // 只在构造时写、之后只读，靠 content.add 的 happens-before 传递即可，无需 volatile。
@@ -149,6 +153,11 @@ public class DownloadItem implements Serializable {
         return this.state == DownloadState.FAILED;
     }
 
+    /** Raw terminal result: a late pause must not hide a committed output from cleanup. */
+    public boolean isSuccess() {
+        return this.state == DownloadState.SUCCESS;
+    }
+
     public int getState() {
         if (this.state == DownloadState.FAILED) {
             return DownloadState.FAILED;
@@ -227,3 +236,4 @@ public class DownloadItem implements Serializable {
         public static final int PAUSED = 4;
     }
 }
+

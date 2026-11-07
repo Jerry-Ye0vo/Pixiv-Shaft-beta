@@ -24,6 +24,8 @@ import java.io.File
 object ImageTaskRegistry {
 
     private const val MAX_CACHE_SIZE = 256
+    private fun registryKey(request: ImageRequest): String =
+        (if (request.isOriginal) "original:" else "preview:") + request.key
 
     /** 下载协程的宿主作用域,进程级、不随 UI 销毁。 */
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -42,6 +44,7 @@ object ImageTaskRegistry {
             override fun removeEldestEntry(eldest: Map.Entry<String, ImageLoadTask>?): Boolean {
                 val evict = size > MAX_CACHE_SIZE
                 if (evict && eldest != null) {
+                    eldest.value.releaseUnused()
                     Timber.d("[ImgV3] registry EVICT url=${eldest.key.substringAfterLast('/')} state=${eldest.value.state.value} pool=$size")
                 }
                 return evict
@@ -55,25 +58,18 @@ object ImageTaskRegistry {
     @Synchronized
     fun obtain(request: ImageRequest, autoStart: Boolean = true): ImageLoadTask {
         val shortUrl = request.url.substringAfterLast('/')
-        val existing = taskMap[request.key]
+        val existing = taskMap[registryKey(request)]
         if (existing != null) {
             Timber.d("[ImgV3] registry REUSE url=$shortUrl state=${existing.state.value} pool=${taskMap.size}")
             if (autoStart) existing.start()
             return existing
         }
 
-        val initialFile = if (request.isOriginal) {
-            runCatching { Shaft.getContext() }.getOrNull()?.let { ctx ->
-                OriginalImageCacheManager.find(ctx, request.url)
-            }
-        } else {
-            null
-        }
-
         val fetcher = resolveFetcher(request)
-        val task = ImageLoadTask(request, scope, fetcher, initialFile = initialFile)
-        taskMap[request.key] = task
-        Timber.d("[ImgV3] registry CREATE url=$shortUrl isOriginal=${request.isOriginal} autoStart=$autoStart hasInitial=${initialFile != null} pool=${taskMap.size}")
+        val task = ImageLoadTask(request, scope, fetcher,
+            shouldRetryStall = { if (request.isOriginal) false else shouldSilentlyRetryImageStall(it) })
+        taskMap[registryKey(request)] = task
+        Timber.d("[ImgV3] registry CREATE url=$shortUrl isOriginal=${request.isOriginal} autoStart=$autoStart pool=${taskMap.size}")
         if (autoStart) task.start()
         return task
     }
@@ -81,7 +77,10 @@ object ImageTaskRegistry {
     /** 无副作用地窥探某 url 是否已有可用的下载结果(用于占位链/缓存命中判断)。 */
     @Synchronized
     fun peekFile(url: String, isOriginal: Boolean = false): File? {
-        val file = taskMap[url]?.currentFile
+        // A completed file for the identical URL has the same bytes in either channel.
+        // Only running fetchers are channel-isolated; preserve cached-file lookup compatibility.
+        val file = taskMap[registryKey(ImageRequest(url, isOriginal = isOriginal))]?.currentFile
+            ?: taskMap[registryKey(ImageRequest(url, isOriginal = !isOriginal))]?.currentFile
         if (file != null && file.exists() && file.length() > 0) {
             return file
         }
@@ -100,11 +99,15 @@ object ImageTaskRegistry {
 
     /** Lookup only: saving can join an existing display task without starting a new fetch. */
     @Synchronized
-    internal fun peekTask(url: String): ImageLoadTask? = taskMap[url]
+    internal fun peekTask(url: String): ImageLoadTask? =
+        taskMap[registryKey(ImageRequest(url, isOriginal = true))] ?: taskMap[registryKey(ImageRequest(url))]
 
     @Synchronized
     fun remove(url: String) {
-        val removed = taskMap.remove(url)
+        val original = taskMap.remove(registryKey(ImageRequest(url, isOriginal = true)))
+        val removed = taskMap.remove(registryKey(ImageRequest(url))) ?: original
+        original?.releaseUnused(); removed?.releaseUnused()
         Timber.d("[ImgV3] registry REMOVE url=${url.substringAfterLast('/')} found=${removed != null} pool=${taskMap.size}")
     }
 }
+

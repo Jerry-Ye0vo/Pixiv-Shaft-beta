@@ -1,0 +1,137 @@
+name: Publish Beta
+
+on:
+  push:
+    branches: [feat/unified-content-queue]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: publish-beta-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    name: Signed Beta and publication
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      BETA_REVISION: '15'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Test build script and automatic versions
+        run: |
+          python3 scripts/test-build-test-apk.py
+          python3 scripts/test-verify-apk-certificate.py
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Require fixed Beta signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.SHAFT_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.SHAFT_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.SHAFT_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.SHAFT_KEY_PASSWORD }}
+        run: |
+          for variable in KEYSTORE_B64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!variable}" ]; then
+              echo "::error::Missing fixed Beta signing secret: $variable. See docs/beta-signing.md."
+              exit 1
+            fi
+          done
+          umask 077
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/beta-keystore.jks"
+          keytool -exportcert -keystore "$RUNNER_TEMP/beta-keystore.jks" \
+            -storepass:env KEYSTORE_PASSWORD -alias "$KEY_ALIAS" \
+            -file "$RUNNER_TEMP/beta-signing.crt"
+          actual="$(openssl x509 -inform DER -in "$RUNNER_TEMP/beta-signing.crt" -noout -fingerprint -sha256 | cut -d= -f2 | tr -d ':[:space:]' | tr '[:upper:]' '[:lower:]')"
+          expected="$(tr -d '[:space:]' < config/beta-signing-cert.sha256)"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::Configured key does not match the fixed Beta signing certificate."
+            exit 1
+          fi
+          echo "Beta signing certificate SHA-256: $actual"
+          {
+            echo "storeFile=$RUNNER_TEMP/beta-keystore.jks"
+            echo "storePassword=$KEYSTORE_PASSWORD"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "keyPassword=$KEY_PASSWORD"
+          } > keystore.properties
+      - name: Build incremental test APK
+        env:
+          BETA_REVISION: ${{ env.BETA_REVISION }}
+        run: bash scripts/build-test-apk.sh --revision "$BETA_REVISION"
+      - name: Verify Beta package, version and signing certificate
+        env:
+          BETA_REVISION: ${{ env.BETA_REVISION }}
+        run: |
+          apk=(dist/test-apk/*.apk)
+          package_id="$(apkanalyzer manifest application-id "${apk[0]}")"
+          echo "APK application ID: $package_id"
+          if [ "$package_id" != 'ceui.pixiv.pshaft.beta' ]; then
+            echo "::error::APK package mismatch: expected ceui.pixiv.pshaft.beta; got $package_id"
+            exit 1
+          fi
+          version_name="$(apkanalyzer manifest version-name "${apk[0]}")"
+          version_code="$(apkanalyzer manifest version-code "${apk[0]}")"
+          echo "APK version name: $version_name"
+          echo "APK version code: $version_code"
+          expected_version_code="$((43600 + BETA_REVISION))"
+          if [ "$version_name" != "4.9.9-beta.$BETA_REVISION" ]; then
+            echo "::error::APK version name mismatch: expected 4.9.9-beta.$BETA_REVISION; got $version_name"
+            exit 1
+          fi
+          if [ "$version_code" != "$expected_version_code" ]; then
+            echo "::error::APK version code mismatch: expected $expected_version_code; got $version_code"
+            exit 1
+          fi
+          tools=("$ANDROID_HOME"/build-tools/*/apksigner)
+          if ! signing_report="$("${tools[${#tools[@]}-1]}" verify --verbose --print-certs "${apk[0]}" 2>&1)"; then
+            printf '%s\n' "$signing_report"
+            echo "::error::apksigner could not verify the APK signature"
+            exit 1
+          fi
+          printf '%s\n' "$signing_report"
+          certificate="$(printf '%s\n' "$signing_report" | python3 scripts/verify-apk-certificate.py config/beta-signing-cert.sha256)"
+          echo "APK signing certificate SHA-256: $certificate"
+          {
+            echo "applicationId=$package_id"
+            echo "versionName=$version_name"
+            echo "versionCode=$version_code"
+            echo "certificateSha256=$certificate"
+            echo "commit=${{ github.sha }}"
+            echo "iteration=$BETA_REVISION"
+          } | tee dist/test-apk/build-info.txt
+      - name: Upload APK and checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixiv-shaft-beta-test-${{ github.sha }}
+          path: dist/test-apk/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Wait for full CI and publish verified Beta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/publish-verified-beta.py
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: page-selection-test-reports
+          path: app/build/reports/tests/
+          if-no-files-found: ignore
+      - name: Remove temporary signing files
+        if: always()
+        run: rm -f keystore.properties "$RUNNER_TEMP/beta-keystore.jks" "$RUNNER_TEMP/beta-signing.crt"
+

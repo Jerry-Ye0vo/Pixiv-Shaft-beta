@@ -1,0 +1,19 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="content_task_choose_format">書き出し形式を選択して続行</string>
+    <string name="content_task_processing">処理中：ページを離れても続行します</string>
+    <string name="content_task_persisted">タスクを保存しました</string>
+    <string name="content_task_running">実行中</string>
+    <string name="content_task_paused">一時停止</string>
+    <string name="content_task_failed">失敗</string>
+    <string name="content_task_done">完了</string>
+    <string name="content_task_cancelled">キャンセル済み</string>
+    <string name="content_task_stopping">停止中</string>
+    <string name="content_task_waiting">待機中</string>
+    <string name="content_task_resume">再開</string>
+    <string name="content_task_pause">一時停止</string>
+    <string name="content_task_cancel">タスクをキャンセル</string>
+    <string name="content_task_recent">最近のタスク</string>
+    <string name="content_task_finish_partial">取得を停止して取得済みの章を保存</string>
+    <string name="content_task_recent_empty">他のタスク履歴はありません</string>
+</resources>

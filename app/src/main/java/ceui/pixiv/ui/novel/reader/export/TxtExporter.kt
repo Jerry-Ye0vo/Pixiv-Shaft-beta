@@ -28,7 +28,7 @@ class TxtExporter : NovelExporter {
         val text = buildString {
             if (novel != null) {
                 append(
-                    NovelHeaderRenderer.render(
+                    NovelOutputSession.current.get()?.header ?: NovelHeaderRenderer.render(
                         novel = novel,
                         preset = HeaderConfigRepo.activePreset(),
                         isSeriesChapter = novel.series != null,
@@ -83,3 +83,4 @@ class TxtExporter : NovelExporter {
         return ExportResult.Success(uri, destination.joinTo(), format)
     }
 }
+

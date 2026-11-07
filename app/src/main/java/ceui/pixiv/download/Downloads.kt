@@ -92,6 +92,25 @@ class Downloads(
         return FsSanitizer.clean(raw)
     }
 
+    /** Freeze a derivative's sanitized template destination without probing storage. */
+    fun resolveDerivedPath(item: DownloadItem, filenameSuffix: String): RelativePath {
+        require(filenameSuffix.isNotBlank())
+        return resolvePath(item).withFilenameSuffix(filenameSuffix)
+    }
+
+    fun existsResolved(storage: StorageChoice, path: RelativePath): Boolean =
+        backendFactory(storage).exists(FsSanitizer.clean(path))
+
+    /** A queued output uses the destination and policy accepted at admission, even after settings change. */
+    fun openResolved(storage: StorageChoice, rawPath: RelativePath, mime: String,
+                     policy: OverwritePolicy): StorageBackend.WriteHandle? {
+        val backend = backendFactory(storage)
+        val cleaned = FsSanitizer.clean(rawPath)
+        val (path, skip) = applyOverwritePolicy(cleaned, backend, policy, mime)
+        if (skip) return null
+        return if (policy == OverwritePolicy.Replace) backend.replace(path, mime) else backend.open(path, mime)
+    }
+
     /**
      * Whether a file already sits at [item]'s canonical path. Pure existence
      * probe — never creates anything (unlike the Skip branch of [plan], whose
@@ -269,3 +288,4 @@ class Downloads(
         )
     }
 }
+

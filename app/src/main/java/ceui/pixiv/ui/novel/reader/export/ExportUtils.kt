@@ -11,6 +11,8 @@ import com.bumptech.glide.Glide
 import java.io.ByteArrayOutputStream
 import java.io.OutputStream
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 
 /**
  * Shared helpers for the export pipeline: MediaStore writes, filename
@@ -33,18 +35,21 @@ internal object ExportUtils {
      * OEM-specific, user-actionable) exception so the export pipeline can show
      * the real cause instead of a generic "无法写入 Downloads".
      */
-    fun saveToDownloads(
+    suspend fun saveToDownloads(
         context: Context,
         destination: RelativePath,
         mimeType: String,
         bucket: Bucket = Bucket.Novel,
         writer: (OutputStream) -> Unit,
     ): Uri? {
+        NovelOutputSession.current.get()?.let { return it.capture(mimeType, writer) }
+        return ceui.pixiv.download.queue.ContentPhases.run("novel-export", "legacy-publish",
+            "novel-output:" + destination.joinTo(), ceui.pixiv.download.queue.ContentQueueStore.Pool.COPY) {
         val handle = DownloadsRegistry.downloads.openRaw(
             bucket,
             destination,
             mimeType,
-        ) ?: return null
+        ) ?: return@run null
         // The backend throws deliberately-actionable, OEM-specific messages
         // (e.g. "下载目录被系统占用，无法写入 …/，请在文件管理器删掉同名旧文件后重试"
         // on vivo / MIUI / HarmonyOS skins) that the user must see. On a
@@ -58,7 +63,8 @@ internal object ExportUtils {
             handle.onAbort()
             throw t
         }
-        return handle.uri
+        handle.uri
+        }
     }
 
     /** Replace all `<br/>`-like HTML tags with newlines and strip remaining markup. */
@@ -74,28 +80,45 @@ internal object ExportUtils {
      * Synchronously load a bitmap via Glide and return a [Result].
      * Blocks on a worker thread.
      */
-    fun loadBitmapResult(context: Context, url: String, maxSide: Int = 1200): Result<Bitmap> {
-        return runCatching {
-            val bitmap = Glide.with(context.applicationContext)
+    suspend fun loadBitmapResult(context: Context, url: String, maxSide: Int = 1200): Result<Bitmap> {
+        return try {
+            ceui.pixiv.imageloader.ResumableOkHttpFetcher.acquire(url, {}, saving = true).use { source ->
+            ceui.pixiv.download.queue.ContentPhases.run("novel-export", "image-decode", "novel-image:$url",
+                ceui.pixiv.download.queue.ContentQueueStore.Pool.ENCODE) {
+            val request = Glide.with(context.applicationContext)
                 .asBitmap()
-                .load(GlideUrlChild(url))
+                .load(source.file)
                 .submit(maxSide, maxSide)
-                .get(30, TimeUnit.SECONDS)
-            bitmap ?: throw IllegalStateException("Glide returned null bitmap for $url")
-        }.onFailure {
-            timber.log.Timber.w(it, "loadBitmap failed for $url")
+            val stopping = kotlinx.coroutines.CoroutineScope(kotlin.coroutines.coroutineContext).launch(
+                kotlinx.coroutines.Dispatchers.IO, start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+                try { kotlinx.coroutines.awaitCancellation() } finally { request.cancel(true) }
+            }
+            try {
+                val bitmap = request.get(30, TimeUnit.SECONDS)
+                kotlin.coroutines.coroutineContext.ensureActive()
+                Result.success(bitmap ?: throw IllegalStateException("Glide returned null bitmap for $url"))
+            } finally { stopping.cancel() }
+            }
+            }
+        } catch (error: Exception) {
+            kotlin.coroutines.coroutineContext.ensureActive()
+            timber.log.Timber.w(error, "loadBitmap failed for $url")
+            Result.failure(error)
         }
     }
 
     /** Synchronously load a bitmap via Glide. Blocks on a worker thread. */
-    fun loadBitmap(context: Context, url: String, maxSide: Int = 1200): Bitmap? {
+    suspend fun loadBitmap(context: Context, url: String, maxSide: Int = 1200): Bitmap? {
         return loadBitmapResult(context, url, maxSide).getOrNull()
     }
 
     /** Compress a bitmap to JPEG bytes. Recycles nothing — caller manages lifecycle. */
-    fun bitmapToJpeg(bitmap: Bitmap, quality: Int = 85): ByteArray {
+    suspend fun bitmapToJpeg(bitmap: Bitmap, quality: Int = 85): ByteArray =
+        ceui.pixiv.download.queue.ContentPhases.run("novel-export", "image-encode", "novel-bitmap:" + System.identityHashCode(bitmap),
+            ceui.pixiv.download.queue.ContentQueueStore.Pool.ENCODE) {
         val out = ByteArrayOutputStream()
         bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
-        return out.toByteArray()
+        out.toByteArray()
     }
 }
+

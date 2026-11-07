@@ -36,7 +36,6 @@ import ceui.lisa.activities.Shaft;
 import ceui.lisa.database.AppDatabase;
 import ceui.lisa.database.DownloadDao;
 import ceui.lisa.database.DownloadEntity;
-import ceui.lisa.database.DownloadingEntity;
 import ceui.lisa.download.DownloadFileFactory;
 import ceui.lisa.download.DownloadProgress;
 import ceui.lisa.download.MediaStoreUtil;
@@ -69,6 +68,11 @@ import timber.log.Timber;
 public class Manager {
 
     private final Context mContext = Shaft.getContext();
+    private final PageQueueOwner pageQueue = new PageQueueOwner(mContext);
+    private final Map<String, ceui.pixiv.download.queue.ContentQueueStore.Task> leases = new ConcurrentHashMap<>();
+    private final Set<String> blockedClaims = ConcurrentHashMap.newKeySet();
+    private final Set<String> finalizing = ConcurrentHashMap.newKeySet();
+    private java.util.function.Consumer<DownloadItem> workerStarter = item -> downloadOne(mContext, item);
     /**
      * 下载列表。用 {@link CopyOnWriteArrayList}：写入（add/remove/clear）仍走
      * {@code synchronized (this)} 保证复合操作原子（去重 + add），但任何线程的遍历
@@ -93,6 +97,14 @@ public class Manager {
             return t;
         }
     });
+    /** Ordered persistence commands; never wait for Room while holding the UI-facing monitor. */
+    private final ExecutorService queueWrites = Executors.newSingleThreadExecutor(r -> {
+        Thread thread = new Thread(r, "shaft-page-queue-store");
+        thread.setDaemon(true);
+        return thread;
+    });
+    private final Map<String, Object> pendingPersistence = new ConcurrentHashMap<>();
+    private final Set<String> persistenceFailures = ConcurrentHashMap.newKeySet();
     /**
      * 主线程投递（替代 {@code AndroidSchedulers.mainThread().scheduleDirect}）。永远 post、
      * 从不同步执行——哪怕当前已在主线程——保持 Rx 的排队语义（多处逻辑依赖"content.remove
@@ -130,7 +142,7 @@ public class Manager {
      *   - {@link #pumpAvailableSlots} 置 DOWNLOADING 时 add；
      *   - 句柄登记（{@link #registerHandle}）时 remove —— 窗口到此为止；
      *   - 任务终结（{@link #complete}）时 remove —— 覆盖"派发失败、根本没建句柄"的路径；
-     *   - {@link #stopAll()} 时整体 clear —— 停止后所有 item 都 paused，不参与误判。
+     *   - 暂停不清除：等待准备阶段退出或登记句柄，防止快速继续重复派发。
      */
     private final java.util.Set<String> dispatching = ConcurrentHashMap.newKeySet();
     private boolean isRunning = false;
@@ -144,11 +156,66 @@ public class Manager {
      * 放进这里的作品单独享有派发资格，跑完（没有待派发 / 在传的页）由 pump 收回。
      */
     private final java.util.Set<Long> releasedIllusts = ConcurrentHashMap.newKeySet();
+    private final java.util.Set<String> releasedPages = ConcurrentHashMap.newKeySet();
 
     /** 登记传输句柄，同时把 uuid 从 [dispatching] 摘掉（"正在派发"窗口到此为止）。 */
-    private void registerHandle(String uuid, DownloadTask d) {
+    private synchronized void registerHandle(String uuid, DownloadTask d) {
         handles.put(uuid, d);
         dispatching.remove(uuid);
+        boolean allowed = false;
+        for (DownloadItem item : content) {
+            if (uuid.equals(item.getUuid())) { allowed = canContinueAttempt(item); break; }
+        }
+        if (!allowed) d.cancel();
+    }
+
+    private boolean canContinueAttempt(DownloadItem item) {
+        return content.contains(item) && !item.isPaused()
+                && (isRunning || releasedPages.contains(item.getUuid())
+                    || releasedIllusts.contains(item.getIllust().getId()));
+    }
+
+    /** Called after the worker and its storage cleanup have stopped touching resources. */
+    private void workerTerminated(DownloadItem item) {
+        final ceui.pixiv.download.queue.ContentQueueStore.Task lease;
+        final boolean committed, stopped;
+        synchronized (this) {
+            DownloadTask ended = handles.remove(item.getUuid());
+            lease = leases.get(item.getUuid());
+            if (lease == null) {
+                if (ended != null && ended.isCancelled() && !item.isSuccess() && !item.isFailed()) {
+                    item.setState(DownloadItem.DownloadState.INIT);
+                }
+                dispatching.remove(item.getUuid());
+                postMain(this::pumpAvailableSlots);
+                return;
+            }
+            if (!finalizing.add(item.getUuid())) return;
+            dispatching.add(item.getUuid()); // cleanup ended; durable acknowledgement still owns capacity
+            committed = item.isSuccess();
+            stopped = !committed && !item.isFailed();
+        }
+        queueWrites.execute(() -> {
+            try {
+                if (!pageQueue.finish(AppDatabase.getAppDatabase(mContext), Shaft.sGson,
+                        item, lease, committed, stopped)) {
+                    throw new IllegalStateException("Stale page worker acknowledgement");
+                }
+                synchronized (this) {
+                    leases.remove(item.getUuid(), lease);
+                    dispatching.remove(item.getUuid());
+                    finalizing.remove(item.getUuid());
+                    blockedClaims.clear();
+                    if (stopped && !item.isFailed() && !item.isSuccess()) item.setState(DownloadItem.DownloadState.INIT);
+                }
+                PageQueueDiagnostics.event("worker-acknowledged", item);
+                ManagerReactive.invalidate();
+                postMain(this::pumpAvailableSlots);
+            } catch (Throwable t) {
+                // Keep the reservation if acknowledgement fails. Restart recovery is safe after worker exit.
+                reportPersistenceError("worker acknowledgement", t);
+            }
+        });
     }
 
     /**
@@ -214,7 +281,7 @@ public class Manager {
         return true;
     }
 
-    static OkHttpClient buildDownloadOkHttpClient(OkHttpClient base, ProgressTracker displayProgress) {
+    public static OkHttpClient buildDownloadOkHttpClient(OkHttpClient base, ProgressTracker displayProgress) {
         OkHttpClient.Builder builder = base.newBuilder()
                 .protocols(java.util.Collections.singletonList(okhttp3.Protocol.HTTP_1_1));
         builder.networkInterceptors().remove(displayProgress.getInterceptor());
@@ -224,6 +291,11 @@ public class Manager {
     private Manager() {
         uuid = "";
         currentIllustID = 0;
+        ceui.pixiv.download.queue.ContentQueueRuntime.get(mContext).addListener(() -> postMain(() -> {
+            synchronized (Manager.this) { blockedClaims.clear(); }
+            pumpAvailableSlots();
+        }));
+        IO.execute(() -> PageQueueDiagnostics.previousExits(mContext));
     }
 
     /**
@@ -233,8 +305,8 @@ public class Manager {
     private static final int RESTORE_BATCH_SIZE = 20;
     private boolean restoreStarted;
     private int restoreGeneration;
-    // Guarded by this. Keep URLs even if their live tasks finish/get deleted during recovery.
-    private java.util.Set<String> restoreLiveUrls;
+    // Guarded by this. Keep output identities even if live tasks finish/get deleted during recovery.
+    private java.util.Set<String> restoreLiveKeys;
 
     // 字节级限速已彻底删除（debug 调试可视化的 500KB/s 节流）。
     // 唯一保留的是 BulkObjectFetcher.RATE_LIMIT_MS（页间 API 间隔，防 pixiv 429）。
@@ -243,60 +315,86 @@ public class Manager {
         if (restoreStarted) return;
         restoreStarted = true;
         final int generation = restoreGeneration;
-        restoreLiveUrls = content.stream().map(DownloadItem::getUrl).collect(Collectors.toSet());
-        IO.execute(() -> {
-            boolean failed = false;
+        restoreLiveKeys = content.stream().map(PageQueuePersistence::key).collect(Collectors.toSet());
+        // Serialize legacy journal writes with enqueue/clear, then read the snapshot on independent IO.
+        queueWrites.execute(() -> {
             try {
-                AppDatabase database = AppDatabase.getAppDatabase(mContext);
+                ceui.pixiv.download.LegacyPageSaveMigration.migrate(mContext,
+                        AppDatabase.getAppDatabase(mContext), Shaft.sGson);
+            } catch (Exception migrationError) {
+                reportPersistenceError("legacy-import", migrationError);
+            }
+            IO.execute(() -> {
+                boolean failed = false;
                 try {
-                    ceui.pixiv.download.LegacyPageSaveMigration.migrate(mContext, database, Shaft.sGson);
-                } catch (Exception migrationError) {
-                    // Keep unreadable/failed legacy intents, but do not block the existing queue.
-                    Common.showLog("Legacy page save migration failed: " + migrationError.getMessage());
-                    Common.showToast(mContext.getString(R.string.save_image_failed,
-                            migrationError.getMessage()));
-                }
-                List<DownloadItem> restored = readRestoredDownloads(database.downloadDao(), Shaft.sGson);
-                if (restored.isEmpty()) return;
-                synchronized (this) {
-                    if (generation != restoreGeneration) return; // User cleared the queue.
-                    restored.removeIf(item -> restoreLiveUrls.contains(item.getUrl()));
-                    if (DownloadLimitTypeUtil.enqueueAsPaused()) {
-                        // 「不自动下载」恢复出来的项同样没有自动唤醒源，与入列口径一致地呈现为
-                        // 用户暂停；仅 Wi-Fi 的网络等待仍是 INIT（回 Wi-Fi 会唤醒）。
-                        for (DownloadItem item : restored) {
-                            item.setPaused(true);
+                    AppDatabase database = AppDatabase.getAppDatabase(mContext);
+                    List<DownloadItem> restored = pageQueue.restore(database, Shaft.sGson);
+                    if (restored.isEmpty()) return;
+                    java.util.Iterator<DownloadItem> legacySaves = restored.iterator();
+                    while (legacySaves.hasNext()) {
+                        DownloadItem item = legacySaves.next();
+                        if (!item.getIllust().isGif() || !item.isAutoSave()) continue;
+                        synchronized (this) {
+                            if (generation != restoreGeneration) return;
+                            if (restoreLiveKeys.contains(PageQueuePersistence.key(item))) continue;
+                        }
+                        try {
+                            ceui.pixiv.download.queue.ContentPlanTicket parent =
+                                    ceui.pixiv.ui.bulk.QueuedUgoira.get(mContext).importLegacy(item);
+                            synchronized (this) {
+                                if (generation != restoreGeneration) { parent.cancel(); return; }
+                            }
+                            // The durable parent owns replay before the old ZIP-only journal is retired.
+                            pageQueue.cancel(database, item);
+                            legacySaves.remove();
+                        } catch (Exception migrationFailure) {
+                            reportPersistenceError("legacy-ugoira-parent", migrationFailure);
                         }
                     }
-                    restored.addAll(content); // Preserve work added while recovery was running.
-                    content = new CopyOnWriteArrayList<>(restored);
-                }
-                ManagerReactive.invalidate();
-                postMain(() ->
-                        DownloadToasts.show(DownloadToastKind.RECORD_RESTORED, "下载记录恢复成功"));
-            } catch (Throwable t) {
-                failed = true;
-                Common.showLog("Manager restore failed: " + t.getMessage());
-            } finally {
-                synchronized (this) {
-                    if (generation == restoreGeneration) {
-                        restoreLiveUrls = null;
-                        if (failed) restoreStarted = false;
+                    synchronized (this) {
+                        if (generation != restoreGeneration) return; // User cleared the queue.
+                        restored.removeIf(item -> restoreLiveKeys.contains(PageQueuePersistence.key(item)));
+                        if (DownloadLimitTypeUtil.enqueueAsPaused()) {
+                            // 「不自动下载」恢复出来的项同样没有自动唤醒源，与入列口径一致地呈现为
+                            // 用户暂停；仅 Wi-Fi 的网络等待仍是 INIT（回 Wi-Fi 会唤醒）。
+                            for (DownloadItem item : restored) {
+                                item.setPaused(true);
+                            }
+                        }
+                        restored.addAll(content); // Preserve work added while recovery was running.
+                        content = new CopyOnWriteArrayList<>(restored);
+                    }
+                    ManagerReactive.invalidate();
+                    postMain(() ->
+                            DownloadToasts.show(DownloadToastKind.RECORD_RESTORED, "下载记录恢复成功"));
+                } catch (Throwable t) {
+                    failed = true;
+                    Common.showLog("Manager restore failed: " + t.getMessage());
+                } finally {
+                    synchronized (this) {
+                        if (generation == restoreGeneration) {
+                            restoreLiveKeys = null;
+                            if (failed) restoreStarted = false;
+                        }
                     }
                 }
-            }
+            });
         });
     }
 
-    static List<DownloadItem> readRestoredDownloads(DownloadDao dao, Gson gson) {
+    static Gson restoringGson(Gson gson) {
         // Match the complete metadata, not just the ID: an artwork may have been edited
         // between two downloads, with different pages or naming-template inputs.
         // Retain a compact digest rather than every artwork's additional JSON object tree.
         Map<ByteString, Illust> artworks = new HashMap<>();
-        Gson restoringGson = gson.newBuilder().registerTypeAdapter(Illust.class,
+        return gson.newBuilder().registerTypeAdapter(Illust.class,
                 (JsonDeserializer<Illust>) (json, type, context) ->
                         artworks.computeIfAbsent(ByteString.encodeUtf8(json.toString()).sha256(),
                                 key -> gson.fromJson(json, Illust.class))).create();
+    }
+
+    static List<DownloadItem> readRestoredDownloads(DownloadDao dao, Gson gson) {
+        Gson restoringGson = restoringGson(gson);
         List<DownloadItem> restored = new ArrayList<>();
         long after = 0;
         long through = dao.getDownloadingHighWaterMark();
@@ -306,16 +404,20 @@ public class Manager {
                 do {
                     after = cursor.getLong(0);
                     try {
-                        DownloadItem item = restoringGson.fromJson(cursor.getString(1), DownloadItem.class);
-                        if (item != null && item.getIllust() != null) {
-                            // 冷启动一律按 INIT 恢复。state 是"本次会话里跑到哪一步"的临时
-                            // 产物，序列化它没有意义：落库那一刻它正被 pump 改成 DOWNLOADING
-                            // 与否，取决于 persist 和 pump 谁先跑，于是同一次崩溃、不同 run
-                            // 恢复出来的状态可能不同，冷启动行为不可复现。
-                            // 统一成 INIT 之后，pump 直接就能挑走，也不必再靠
-                            // resurrectIfStranded 去猜哪些是"看着在跑、其实没有句柄"的残留。
-                            item.setState(DownloadItem.DownloadState.INIT);
-                            item.setPaused(false);
+                        String originalJson = cursor.getString(1);
+                        DownloadItem item = restoringGson.fromJson(originalJson, DownloadItem.class);
+                        if (item != null && item.getIllust() != null && item.getUrl() != null
+                                && !item.getUrl().isEmpty()) {
+                            PageQueuePersistence.restoreIdentity(dao, gson, item,
+                                    cursor.getString(2), cursor.getString(3), originalJson);
+                            // Unversioned records keep the historical normalization policy.
+                            // Versioned records contain explicit user commands, not transient worker state.
+                            if (item.getQueueRecordVersion() == 0) {
+                                item.setState(DownloadItem.DownloadState.INIT);
+                                item.setPaused(false);
+                            } else if (!item.isFailed()) {
+                                item.setState(DownloadItem.DownloadState.INIT);
+                            }
                             restored.add(item);
                         }
                     } catch (Exception e) {
@@ -349,6 +451,11 @@ public class Manager {
      * 被置 paused，getFirstReady 永远挑不到它们 → 90s 停滞检测 → clearOne → 重拉，假失败循环。
      */
     public void addTask(DownloadItem bean) {
+        addTask(bean, null);
+    }
+
+    /** onCommitted runs on main only after durable admission, never on persistence failure. */
+    public void addTask(DownloadItem bean, Runnable onCommitted) {
         // 纵深防御:null item 会在 safeAdd 里 null.getUuid() NPE(见 gif 走 buildDownloadItem
         // 返 null 的历史坑)。调用方本应先过滤,这里再兜一层,任何 null 直接忽略不崩。
         if (bean == null) {
@@ -360,9 +467,11 @@ public class Manager {
             }
 
             boolean isTaskExist = false;
+            DownloadItem canonical = bean;
             for (DownloadItem item : content) {
-                if (item.isSame(bean)) {
+                if (PageQueuePersistence.key(item).equals(PageQueuePersistence.key(bean))) {
                     isTaskExist = true;
+                    canonical = item;
                 }
             }
 
@@ -370,14 +479,11 @@ public class Manager {
                 if (!bean.isSilent() && DownloadLimitTypeUtil.enqueueAsPaused()) {
                     bean.setPaused(true);
                 }
-                // content.add 必须同步(safeAdd 内)：triggerPump 的 getFirstReady 和
-                // QueueDownloadManager.fillSlots 的 footprint 都靠 content 立刻变长。
-                // 但 addTask 跑在主线程(详情页下载按钮),DownloadingEntity 的
-                // Gson(~80KB)+Room insert 若同步执行,会卡在被并发
-                // hasDownloadRecordByIllustId LIKE 全表扫描占满的 SQLite 连接池上 →
-                // 主线程 ANR。故 safeAdd 内部只保证 add 同步、持久化挪后台。
+                // Reserve in memory for the bulk producer; pendingPersistence prevents execution
+                // until the background transaction commits successfully.
                 safeAdd(bean);
             }
+            notifyAdmissions(java.util.Collections.singletonList(canonical), onCommitted);
             if(DownloadLimitTypeUtil.startTaskWhenCreate()){
                 // 见 triggerPump 的 javadoc —— addTask 是连续调用 hot path
                 // （fillSlots 一轮要 addTask N 次），绝不能走 startAll。
@@ -398,38 +504,92 @@ public class Manager {
         }
     }
 
-    /**
-     * content.add 同步返回，DownloadingEntity 的持久化(Gson 序列化 + Room insert)丢后台。
-     *
-     * <p>唯一调用方 {@link #addTask} 在**主线程持锁**时调用：同步写 Room 会卡在被并发
-     * hasDownloadRecordByIllustId LIKE 全表扫描占满的 SQLite 连接池上 → 主线程 ANR，
-     * 而且持锁期间所有 {@link #contentSnapshot()} 都得排队。批量版 {@link #addTasks}
-     * 不走这里——它自己在锁外整批持久化，避免每条 fan-out 一个 IO 任务。
-     */
+    /** Called under this monitor. Memory reservation is not execution authorization. */
     private void safeAdd(DownloadItem item) {
-        Common.showLog("Manager safeAdd " + item.getUuid());
         content.add(item);
-        if (restoreLiveUrls != null) restoreLiveUrls.add(item.getUrl());
-        final DownloadItem toPersist = item;
-        IO.execute(() -> {
+        PageQueueDiagnostics.event("submit", item);
+        if (restoreLiveKeys != null) restoreLiveKeys.add(PageQueuePersistence.key(item));
+        scheduleAdmission(item);
+    }
+
+    private void scheduleAdmission(DownloadItem item) {
+        final Object ticket = new Object();
+        if (pendingPersistence.putIfAbsent(item.getUuid(), ticket) != null) return;
+        queueWrites.execute(() -> {
             try {
-                persistDownloading(toPersist);
+                synchronized (this) {
+                    if (pendingPersistence.get(item.getUuid()) != ticket || !content.contains(item)) return;
+                }
+                pageQueue.admit(AppDatabase.getAppDatabase(mContext), Shaft.sGson, item);
+                PageQueueDiagnostics.event("admitted", item);
+                synchronized (this) {
+                    if (pendingPersistence.get(item.getUuid()) == ticket) {
+                        persistenceFailures.remove(item.getUuid());
+                        blockedClaims.remove(item.getUuid());
+                    }
+                }
             } catch (Throwable t) {
-                Common.showLog("safeAdd persistDownloading failed: " + t.getMessage());
+                synchronized (this) {
+                    if (pendingPersistence.get(item.getUuid()) == ticket && content.contains(item)) {
+                        // Make retry eligible atomically with publishing failure, not a later finally.
+                        pendingPersistence.remove(item.getUuid(), ticket);
+                        persistenceFailures.add(item.getUuid());
+                        item.setState(DownloadItem.DownloadState.FAILED);
+                    }
+                }
+                reportPersistenceError("enqueue", t);
+            } finally {
+                pendingPersistence.remove(item.getUuid(), ticket);
+                ManagerReactive.invalidate();
+                postMain(() -> {
+                    if (DownloadLimitTypeUtil.startTaskWhenCreate()) triggerPump();
+                    else pumpAvailableSlots(); // a manual request may have arrived while persisting
+                });
             }
         });
     }
 
-    /**
-     * 写 illust_downloading_table 的崩溃恢复记录 —— 只有 restore() 冷启动时读回,
-     * 用来续未完成的下载。Gson(~80KB) + Room insert 都是重 IO,绝不能在主线程跑。
-     */
-    private void persistDownloading(DownloadItem item) {
-        DownloadingEntity entity = new DownloadingEntity();
-        entity.setFileName(item.getName());
-        entity.setUuid(item.getUuid());
-        entity.setTaskGson(Shaft.sGson.toJson(item));
-        AppDatabase.getAppDatabase(Shaft.getContext()).downloadDao().insertDownloading(entity);
+    private void retryAdmissionIfNeeded(DownloadItem item) {
+        if (persistenceFailures.contains(item.getUuid())) scheduleAdmission(item);
+    }
+
+    private void notifyAdmissions(List<DownloadItem> items, Runnable onCommitted) {
+        if (onCommitted == null || items.isEmpty()) return;
+        queueWrites.execute(() -> {
+            synchronized (this) {
+                for (DownloadItem item : items) {
+                    if (!content.contains(item) || pendingPersistence.containsKey(item.getUuid())
+                            || persistenceFailures.contains(item.getUuid())) return;
+                }
+            }
+            postMain(onCommitted);
+        });
+    }
+
+    private void persistState(DownloadItem item) {
+        final boolean paused = item.isPaused();
+        final int state = item.getState();
+        queueWrites.execute(() -> {
+            try {
+                pageQueue.update(AppDatabase.getAppDatabase(mContext), Shaft.sGson, item, paused, state);
+                blockedClaims.remove(item.getUuid());
+                postMain(this::pumpAvailableSlots);
+            } catch (Throwable t) { reportPersistenceError("state", t); }
+        });
+    }
+
+    private void deletePersisted(DownloadItem item) {
+        queueWrites.execute(() -> {
+            try {
+                pageQueue.cancel(AppDatabase.getAppDatabase(mContext), item);
+            } catch (Throwable t) { reportPersistenceError("remove", t); }
+        });
+    }
+
+    private void reportPersistenceError(String operation, Throwable error) {
+        Timber.tag("ContentQueue").e(error, "Page queue persistence failed: %s", operation);
+        postMain(() -> DownloadToasts.show(DownloadToastKind.DOWNLOAD_FAILED,
+                mContext.getString(R.string.save_image_failed, String.valueOf(error.getMessage()))));
     }
 
     /**
@@ -437,90 +597,65 @@ public class Manager {
      * 注意：content 列表修改不在此方法中，由调用方在主线程统一处理。
      */
     private void complete(DownloadItem item, boolean isDownloadSuccess) {
-        // 任务有了终态，"正在派发"窗口随之关闭。派发中途失败（工厂建不出、命中跳过、
-        // 空间不足等）根本没建句柄，靠这一行把 uuid 从 dispatching 摘掉，否则它会一直
-        // 留在集合里，让这条 item 之后再也无法被 resurrectIfStranded 复位。
-        dispatching.remove(item.getUuid());
-        if (isDownloadSuccess) {
-            item.setState(DownloadItem.DownloadState.SUCCESS);
-            setCallback(uuid, null);
-
-            // Gson + DB 操作（IO 安全）
-            DownloadingEntity entity = new DownloadingEntity();
-            entity.setFileName(item.getName());
-            entity.setUuid(item.getUuid());
-            entity.setTaskGson(Shaft.sGson.toJson(item));
-            AppDatabase.getAppDatabase(mContext).downloadDao().deleteDownloading(entity);
-        } else {
-            item.setNonius(0);
-            item.setState(DownloadItem.DownloadState.FAILED);
+        synchronized (this) {
+            if (!leases.containsKey(item.getUuid())) dispatching.remove(item.getUuid());
+            releasedPages.remove(item.getUuid());
+            if (isDownloadSuccess) {
+                item.setState(DownloadItem.DownloadState.SUCCESS);
+                setCallback(uuid, null);
+            } else {
+                item.setNonius(0);
+                item.setState(DownloadItem.DownloadState.FAILED);
+                persistState(item);
+            }
         }
+        if (isDownloadSuccess) {
+            queueWrites.execute(() -> {
+                try {
+                    pageQueue.committed(leases.get(item.getUuid()));
+                    AppDatabase.getAppDatabase(mContext).downloadDao()
+                            .deleteDownloadingByIdentity(item.getName(), item.getUuid());
+                } catch (Throwable t) { reportPersistenceError("complete", t); }
+            });
+        }
+        // Preparation-only exits have no DownloadTask.onFinally callback.
+        if (!handles.containsKey(item.getUuid())) workerTerminated(item);
         ManagerReactive.invalidate();
     }
 
     public void addTasks(List<DownloadItem> list) {
-        if (Common.isEmpty(list)) return;
+        addTasks(list, null);
+    }
 
-        // Gson 序列化 + DB INSERT 是重操作（172P 场景需序列化 ~13MB JSON + 172 次 INSERT），
-        // 必须在后台线程执行，否则主线程卡死。
+    public void addTasks(List<DownloadItem> list, Runnable onCommitted) {
+        if (Common.isEmpty(list)) return;
+        final List<DownloadItem> submitted = new ArrayList<>(list);
+        final int generation;
+        synchronized (this) { generation = restoreGeneration; }
         IO.execute(() -> {
-            long t0 = System.nanoTime();
-            // 持久化**必须留在临界区外**：锁住的这段时间里，任何线程的 contentSnapshot()
-            // 都得排队等——包括详情页 FAB 在主线程读队列那一下。把 172 次
-            // Gson(~80KB)+Room insert 关在锁里，等于让主线程陪着这整批 IO 一起卡（ANR）。
-            // 临界区只保留「去重 + content.add」这点纯内存操作，其余挪出去。
-            List<DownloadItem> accepted = new ArrayList<>(list.size());
-            boolean isPausedMode = DownloadLimitTypeUtil.enqueueAsPaused();
             synchronized (this) {
-                if (content == null) {
-                    content = new CopyOnWriteArrayList<>();
-                }
-                // 批量构建一个 HashSet 做 O(1) 去重，避免 O(n^2) 逐项扫描
-                Set<String> existingUrls = new HashSet<>();
-                for (DownloadItem existing : content) {
-                    existingUrls.add(existing.getUrl());
-                }
-                for (DownloadItem item : list) {
-                    // 与 addTask 对齐:跳过 null item(gif 走 buildDownloadItem 返 null 的历史坑),
-                    // 否则 item.getUrl() 直接 NPE。调用方本应先过滤,这里兜底。
-                    if (item != null && !existingUrls.contains(item.getUrl())) {
-                        if (isPausedMode && !item.isSilent()) {
-                            // 「不自动下载」入列即暂停态（等待态只属于仅 Wi-Fi 的网络暂缓）。
-                            item.setPaused(true);
-                        }
-                        // content.add 必须同步:triggerPump 的 getFirstReady 靠 content 立刻变长。
-                        content.add(item);
-                        if (restoreLiveUrls != null) restoreLiveUrls.add(item.getUrl());
-                        existingUrls.add(item.getUrl());
-                        accepted.add(item);
+                if (generation != restoreGeneration) return; // cleared before the producer ran
+                Map<String, DownloadItem> existing = new HashMap<>();
+                for (DownloadItem item : content) existing.put(PageQueuePersistence.key(item), item);
+                List<DownloadItem> admitted = new ArrayList<>();
+                for (DownloadItem item : submitted) {
+                    if (item == null) continue;
+                    DownloadItem canonical = existing.get(PageQueuePersistence.key(item));
+                    if (canonical == null) {
+                        if (!item.isSilent() && DownloadLimitTypeUtil.enqueueAsPaused()) item.setPaused(true);
+                        safeAdd(item); // same durable admission gate as single-page saves
+                        existing.put(PageQueuePersistence.key(item), item);
+                        canonical = item;
                     }
+                    admitted.add(canonical);
                 }
+                notifyAdmissions(admitted, onCommitted);
             }
-            // 崩溃恢复记录:落后于 content 一小段时间。这段窗口里进程被杀会丢掉「续传」记录
-            // (下次冷启少恢复几条)，与 safeAdd 把持久化丢后台是同一个取舍——远比让主线程
-            // 陪着整批 IO 一起卡划算。
-            for (DownloadItem item : accepted) {
-                try {
-                    persistDownloading(item);
-                } catch (Throwable t) {
-                    Common.showLog("addTasks persistDownloading failed: " + t.getMessage());
-                }
-            }
-            long totalMs = (System.nanoTime() - t0) / 1_000_000;
-            Common.showLog("[PERF] addTasks total=" + list.size()
-                    + " items, totalMs=" + totalMs);
-            // batch 完一次 invalidate 即可（DROP_OLDEST 保证多次 tryEmit 自动合并，
-            // 但仍是最佳实践：每个语义批次 emit 一次而不是每条 safeAdd 都 emit）
             ManagerReactive.invalidate();
-            postMain(() -> {
-                if (DownloadLimitTypeUtil.startTaskWhenCreate()) {
-                    triggerPump();
-                }
-            });
         });
     }
 
-    public void startAll() {
+    public synchronized void startAll() {
         Common.showLog("[DL-RACE] startAll (用户态 resume / 冷启动残留路径，走 resurrect)");
         // 用 snapshot 迭代：item.setPaused/state 是各自字段写入,跟 content 结构无关;
         // 直接 for-each live content 跟并发的 addTasks/safeAdd/remove 抢 modCount,CME。
@@ -528,6 +663,8 @@ public class Manager {
             if (item != null && !item.isFailed()) {
                 item.setPaused(false);
                 resurrectIfStranded(item);
+                retryAdmissionIfNeeded(item);
+                persistState(item);
             }
         }
         isRunning = true;
@@ -559,58 +696,19 @@ public class Manager {
         pumpAvailableSlots();
     }
 
-    /**
-     * 单卡「开始」：只把被点的那一条推下去，不顺带放行其它等待项。
-     *
-     * <p>与 {@link #startAll} / {@link #triggerPump} 的差别是**范围**：那两个是全局动作，
-     * 会把 content 里所有 INIT 项一起放行；这里是用户对**这一条**的意志。
-     *
-     * <p>历史上这里是 {@code isRunning = true; pumpAvailableSlots();} —— 在「仅通过 Wi-Fi
-     * 下载」切到蜂窝时（{@link #parkForNetwork} 把在传的翻回 INIT 且**不置 paused**），
-     * {@link #pumpAvailableSlots} 的 {@link #getFirstReady} 会把所有等待项一起挑走：用户
-     * 「只想先下其中一个」，结果连带数量 = maxConcurrentDownloads，且每条完成后的 onFinally
-     * 再 pump 一轮继续带走剩下的 —— 整队都在蜂窝上跑起来。改前的 stopAll() 语义
-     * （paused=true）恰好把兄弟项挡在 getFirstReady 之外，是 parkForNetwork 换掉暂停语义
-     * 之后暴露出来的。
-     *
-     * <p>现在只有全局泵本来就开着（模式 0 / 模式 1 且在 Wi-Fi —— 自动路径本来就该填满
-     * 槽位）才顺带 pump；泵关着（{@link #parkForNetwork} 熄火、冷启动恢复、模式 2 入列）
-     * 时一条都不带。口径见 {@link #fanOutOthersOnStartOne(boolean)}。
-     *
-     * <p>取舍：泵开着且槽位已满时，被点的那一条会立刻起（可能瞬时
-     * maxConcurrentDownloads+1）—— 用户手动点的那一条优先于自动并发上限；自动路径
-     * （pump）的并发上限不变。
-     */
-    public void startOne(String uuid) {
-        DownloadItem target = null;
-        for (DownloadItem downloadItem : contentSnapshot()) {
-            if (downloadItem != null && downloadItem.getUuid().equals(uuid)) {
-                downloadItem.setPaused(false);
-                resurrectIfStranded(downloadItem);
-                target = downloadItem;
-                break;
+    /** Release only the selected page; all starts pass through the bounded pump. */
+    public synchronized void startOne(String uuid) {
+        for (DownloadItem item : content) {
+            if (uuid.equals(item.getUuid())) {
+                item.setPaused(false);
+                resurrectIfStranded(item);
+                retryAdmissionIfNeeded(item);
+                persistState(item);
+                releasedPages.add(uuid);
+                pumpAvailableSlots();
+                ManagerReactive.invalidate();
+                return;
             }
-        }
-        if (target == null) {
-            // 目标已经不在了（被 clearOne / 清空全部拿掉）：什么都不做，尤其不能顺手
-            // pump 把别的等待项带起来。
-            ManagerReactive.invalidate();
-            return;
-        }
-        Common.showLog("已开始 " + uuid);
-
-        // 只派发这一条 —— 与 pumpAvailableSlots 共用同一段派发逻辑，并在同一把锁里做
-        // 「state 检查 + 置 DOWNLOADING + 登记 dispatching」，避免和并发的 pump /
-        // onFinally 抢同一条（同 pumpAvailableSlots 的 synchronized 理由）。
-        synchronized (this) {
-            if (target.getState() == DownloadItem.DownloadState.INIT && !target.isPaused()) {
-                dispatchOne(target);
-            }
-        }
-
-        // 泵本来就开着才顺带填满其它槽位；泵关着时保持关着 —— 这次放行只覆盖这一条。
-        if (fanOutOthersOnStartOne(isRunning)) {
-            pumpAvailableSlots();
         }
         ManagerReactive.invalidate();
     }
@@ -632,12 +730,14 @@ public class Manager {
      *
      * @return 队列里是否有该作品的条目；false = 还没入列（异步入列尚未落地），什么都没做。
      */
-    public boolean startIllust(long illustId) {
+    public synchronized boolean startIllust(long illustId) {
         boolean found = false;
         for (DownloadItem downloadItem : contentSnapshot()) {
             if (downloadItem != null && downloadItem.getIllust() != null && downloadItem.getIllust().getId() == illustId) {
                 downloadItem.setPaused(false);
                 resurrectIfStranded(downloadItem);
+                retryAdmissionIfNeeded(downloadItem);
+                persistState(downloadItem);
                 found = true;
             }
         }
@@ -663,16 +763,23 @@ public class Manager {
         return isRunning || releasedIllusts.contains(illustId);
     }
 
+    /** Includes manual page requests waiting for a slot, without releasing sibling pages. */
+    public synchronized boolean willDispatchPage(long illustId, int page) {
+        if (willDispatch(illustId)) return true;
+        for (DownloadItem item : content) {
+            if (item.getIllust() != null && item.getIllust().getId() == illustId
+                    && item.getIndex() == page && !item.isPaused()
+                    && releasedPages.contains(item.getUuid())) return true;
+        }
+        return false;
+    }
+
     /**
      * 把"看似在跑但实际已经没有 disposable 在背后撑着"的 item 翻回 INIT，让
      * [pumpAvailableSlots] 重新挑选派发。两种来源：
      *
-     *  1. **stopAll() 之后**：stopAll 把 paused=true、dispose 全部 handles，但
-     *     **不动 state 字段**——getState() 在 paused=true 时直接返回 PAUSED，
-     *     UI 也显示 PAUSED，没问题。但 startAll 的 paused=false 一翻，state 字段
-     *     原值（DOWNLOADING）就暴露出来；这时 handles 已经空了，没人真在传。
-     *     pumpAvailableSlots 的 activeCount() 把它们算进活跃数，getFirstReady 又
-     *     只挑 INIT —— 槽位永远拉不到，下载彻底卡死（issue #873）。
+     * 暂停后的 worker/准备阶段仍保留名额。执行器确认退出时将取消项归为 INIT；
+     * 此处只修复确实没有句柄和准备阶段的 DOWNLOADING 残留，不提前重派仍在退出的任务。
      *
      * 冷启动 restore 带回的残留**不走这里**：readRestoredDownloads 已经把恢复出来的
      * item 状态统一归成 INIT（见那里的注释），恢复完就能直接被 pump 挑走，不需要先猜
@@ -719,22 +826,25 @@ public class Manager {
         }
     }
 
-    public void stopAll() {
+    public synchronized void stopAll() {
+        stopAll(true);
+    }
+
+    private void stopAll(boolean recordState) {
         for (DownloadItem item : contentSnapshot()) {
             if (item != null && !item.isFailed()) {
                 item.setPaused(true);
+                if (recordState) persistState(item);
             }
         }
         isRunning = false;
         releasedIllusts.clear();
+        releasedPages.clear();
         // cancel 全部正在传输的下载（snapshot 防 CME）
         for (DownloadTask d : new ArrayList<>(handles.values())) {
             try { d.cancel(); } catch (Exception ignored) {}
         }
-        handles.clear();
-        // 停止后非 FAILED 的 item 都 paused（getState() 返回 PAUSED），不会再被误判成 stranded，
-        // dispatching 里的残留也一并清掉，免得 resume 时把还没派发的 uuid 当成"在跑"。
-        dispatching.clear();
+        // Stopping workers and preparation still own their slots until termination acknowledgement.
         Common.showLog("[DL-RACE] stopAll (已经停止)");
         ManagerReactive.invalidate();
     }
@@ -743,12 +853,14 @@ public class Manager {
      * 只对 FAILED 态的任务下发启动：把 FAILED 翻回 INIT，并触发 pumpAvailableSlots。
      * 其余非 FAILED 态（DOWNLOADING、INIT、PAUSED）的任务一律不碰。
      */
-    public void retryAllFailed() {
+    public synchronized void retryAllFailed() {
         Common.showLog("[DL-RACE] retryAllFailed (只对 FAILED 态下发启动)");
         for (DownloadItem item : contentSnapshot()) {
             if (item != null && item.isFailed()) {
                 item.setPaused(false);
                 resurrectIfStranded(item);
+                retryAdmissionIfNeeded(item);
+                persistState(item);
             }
         }
         isRunning = true;
@@ -774,54 +886,66 @@ public class Manager {
      * 别把「不自动下载」也塞进这条路：它没有任何自动唤醒源（回到 Wi-Fi 也不会替它启动），
      * 入列时已按暂停态呈现（见 [DownloadLimitTypeUtil.enqueueAsPaused]），与本方法无关。
      */
-    public void parkForNetwork() {
+    public synchronized void parkForNetwork() {
         // 先熄火再取消：cancel 触发的 onFinally 会调 pumpAvailableSlots，
         // isRunning=false 让那一轮直接 return，避免又派发出去。
         // 详情页单独放行的作品也一并收回：离开 Wi-Fi 后同样退回等待，要走流量需用户再点一次。
         isRunning = false;
         releasedIllusts.clear();
+        releasedPages.clear();
         for (DownloadTask d : new ArrayList<>(handles.values())) {
             try { d.cancel(); } catch (Exception ignored) {}
         }
-        handles.clear();
         for (DownloadItem item : contentSnapshot()) {
             int s = item.getState();
             if (s == DownloadItem.DownloadState.DOWNLOADING || s == DownloadItem.DownloadState.INIT) {
                 item.setState(DownloadItem.DownloadState.INIT);
+                persistState(item);
+                queueWrites.execute(() -> pageQueue.park(item));
             }
         }
         Common.showLog("[DL-NET] parkForNetwork: 下载退回等待态，等网络恢复后自动接续");
         ManagerReactive.invalidate();
     }
 
-    public void stopOne(String uuid){
+    public synchronized void stopOne(String uuid){
+        stopOne(uuid, true);
+    }
+
+    private void stopOne(String uuid, boolean recordState) {
+        releasedPages.remove(uuid);
         for (DownloadItem item : contentSnapshot()) {
             if(item.getUuid().equals(uuid)){
                 item.setPaused(true);
+                if (recordState) persistState(item);
                 Common.showLog("已暂停 " + uuid);
                 break;
             }
         }
-        DownloadTask d = handles.remove(uuid);
+        DownloadTask d = handles.get(uuid);
         if (d != null) {
             try { d.cancel(); } catch (Exception ignored) {}
         }
         ManagerReactive.invalidate();
     }
 
-    public void clearAll() {
-        stopAll();
-        AppDatabase.getAppDatabase(mContext).downloadDao().deleteAllDownloading();
-        synchronized (this) {
-            restoreGeneration++;
-            restoreLiveUrls = null;
-            content.clear();
-        }
+    public synchronized void clearAll() {
+        stopAll(false);
+        restoreGeneration++;
+        restoreLiveKeys = null;
+        content.clear();
+        pendingPersistence.clear();
+        persistenceFailures.clear();
+        blockedClaims.clear();
+        queueWrites.execute(() -> {
+            try { pageQueue.clear(AppDatabase.getAppDatabase(mContext), Shaft.sGson); }
+            catch (Throwable t) { reportPersistenceError("clear", t); }
+        });
         ManagerReactive.invalidate();
     }
 
-    public void clearOne(String uuid) {
-        stopOne(uuid);
+    public synchronized void clearOne(String uuid) {
+        stopOne(uuid, false);
         DownloadItem downloadItem;
         synchronized (this) {
             DownloadItem found = null;
@@ -833,13 +957,12 @@ public class Manager {
             }
             if (found == null) return;
             content.remove(found);
+            pendingPersistence.remove(uuid);
+            persistenceFailures.remove(uuid);
+            blockedClaims.remove(uuid);
             downloadItem = found;
         }
-        DownloadingEntity entity = new DownloadingEntity();
-        entity.setFileName(downloadItem.getName());
-        entity.setUuid(downloadItem.getUuid());
-        entity.setTaskGson(Shaft.sGson.toJson(downloadItem));
-        AppDatabase.getAppDatabase(mContext).downloadDao().deleteDownloading(entity);
+        deletePersisted(downloadItem);
         ManagerReactive.invalidate();
     }
 
@@ -855,7 +978,7 @@ public class Manager {
      * 把手动暂停的 item 也强制恢复 —— FragmentSettings 调这个。
      */
     public synchronized void pumpAvailableSlots() {
-        if (!isRunning && releasedIllusts.isEmpty()) return;
+        if (!isRunning && releasedIllusts.isEmpty() && releasedPages.isEmpty()) return;
         int max = Shaft.sSettings.getMaxConcurrentDownloads();
         if (max < 1) max = 1;
         if (max > 5) max = 5;
@@ -878,7 +1001,7 @@ public class Manager {
                 + " dispatched=" + dispatched
                 + " activeAfter=" + active);
 
-        if (active == 0 && getFirstReady() == null) {
+        if (active == 0 && getFirstReady() == null && blockedClaims.isEmpty() && pendingPersistence.isEmpty()) {
             // 没活儿了
             isRunning = false;
             Common.showLog("Manager 已经全部下载完成");
@@ -913,25 +1036,71 @@ public class Manager {
         // 兼容字段：第一个进入的当前下载 = 老 API 返回的 currentIllustID/uuid
         currentIllustID = next.getIllust().getId();
         uuid = next.getUuid();
-        downloadOne(mContext, next);
+        queueWrites.execute(() -> {
+            try {
+                synchronized (this) {
+                    if (!canContinueAttempt(next)) {
+                        dispatching.remove(next.getUuid());
+                        next.setState(DownloadItem.DownloadState.INIT);
+                        postMain(this::pumpAvailableSlots);
+                        return;
+                    }
+                }
+                int capacity = Math.max(1, Math.min(5, Shaft.sSettings.getMaxConcurrentDownloads()));
+                ceui.pixiv.download.queue.ContentQueueStore.Task lease = pageQueue.claim(next, capacity);
+                if (lease == null) {
+                    PageQueueDiagnostics.event("waiting-for-permit", next);
+                    synchronized (this) {
+                        dispatching.remove(next.getUuid());
+                        next.setState(DownloadItem.DownloadState.INIT);
+                        blockedClaims.add(next.getUuid());
+                    }
+                    postMain(this::pumpAvailableSlots);
+                    return;
+                }
+                leases.put(next.getUuid(), lease);
+                PageQueueDiagnostics.event("claimed", next);
+                postMain(() -> {
+                    synchronized (Manager.this) {
+                        if (!canContinueAttempt(next)) { workerTerminated(next); return; }
+                    }
+                    try { workerStarter.accept(next); }
+                    catch (Throwable t) { reportPersistenceError("worker start", t); complete(next, false); }
+                });
+            } catch (Throwable t) {
+                synchronized (this) {
+                    dispatching.remove(next.getUuid());
+                    next.setState(DownloadItem.DownloadState.FAILED);
+                    persistenceFailures.add(next.getUuid());
+                }
+                reportPersistenceError("claim", t);
+                postMain(this::pumpAvailableSlots);
+            }
+        });
     }
 
     /** 兼容老调用点：等价于 pumpAvailableSlots()。 */
     private void loop() { pumpAvailableSlots(); }
 
-    /** 当前正在传输的 page 数（state=DOWNLOADING 且 !paused）。 */
+    /** Live workers, including cancellation and output finalization, still occupy capacity. */
     private int activeCount() {
-        int n = 0;
+        Set<String> active = new HashSet<>(handles.keySet());
+        active.addAll(dispatching);
         for (DownloadItem it : content) {
-            if (!it.isPaused() && it.getState() == DownloadItem.DownloadState.DOWNLOADING) n++;
+            if (!it.isPaused() && it.getState() == DownloadItem.DownloadState.DOWNLOADING) active.add(it.getUuid());
         }
-        return n;
+        return active.size();
     }
 
     /** 找出可以 dispatch 的下一条：state=INIT、未暂停，且在派发范围内（见 [isDispatchable]）。 */
     private DownloadItem getFirstReady() {
         for (DownloadItem it : content) {
-            if (isDispatchable(it, isRunning, releasedIllusts)) return it;
+            if (pendingPersistence.containsKey(it.getUuid()) || persistenceFailures.contains(it.getUuid())
+                    || blockedClaims.contains(it.getUuid())) continue;
+            if (handles.containsKey(it.getUuid()) || dispatching.contains(it.getUuid())) continue;
+            if (isDispatchable(it, isRunning, releasedIllusts)
+                    || (releasedPages.contains(it.getUuid()) && !it.isPaused()
+                        && it.getState() == DownloadItem.DownloadState.INIT)) return it;
         }
         return null;
     }
@@ -976,7 +1145,9 @@ public class Manager {
         // 所以放在它之后。这条保持 DOWNLOADING 且没有传输句柄，「全部继续」时由
         // resurrectIfStranded 复位重派。
         if (!StorageSpaceGuard.hasRoomForDownload(context)) {
+            downloadItem.setState(DownloadItem.DownloadState.INIT);
             StorageSpaceGuard.pauseDownloadsForLowStorage(context);
+            workerTerminated(downloadItem);
             return;
         }
 
@@ -985,6 +1156,8 @@ public class Manager {
         // SAF factory 创建、文件查询、insert 全部在 IO 线程执行，
         // 避免 172P 连续下载时 SAF 操作阻塞主线程。
         IO.execute(() -> {
+            final DownloadFileFactory[] preparing = new DownloadFileFactory[1];
+            try {
             DownloadFileFactory factory;
             try {
                 // SAF 与否只认 V3 下载配置，不读遗留 downloadWay（#984）；
@@ -995,6 +1168,7 @@ public class Manager {
                     factory = new SAFactory(context, downloadItem);
                 }
             } catch (Exception e) {
+                PageQueueDiagnostics.failure("factory-init", downloadItem, e);
                 Common.showLog("[DL] factory init failed: " + e);
                 e.printStackTrace();
                 postMain(() -> {
@@ -1008,6 +1182,7 @@ public class Manager {
                 return;
             }
 
+            preparing[0] = factory;
             boolean shouldSkip =
                     (factory instanceof Android10DownloadFactory22 && ((Android10DownloadFactory22) factory).isSkip())
                  || (factory instanceof SAFactory && ((SAFactory) factory).isSkip());
@@ -1069,6 +1244,7 @@ public class Manager {
                 try {
                     opened = factory.insert();
                 } catch (Exception e) {
+                    PageQueueDiagnostics.failure("factory-insert", downloadItem, e);
                     Common.showLog("[DL] factory.insert() failed: " + e);
                     e.printStackTrace();
                     // insert() 内部已自带 cleanup（MediaStoreBackend 在 openOutputStream
@@ -1100,8 +1276,25 @@ public class Manager {
             }
 
             // 回主线程启动下载链（handle 赋值需要在一致的线程）
-            postMain(() ->
-                startDownloadChain(context, downloadItem, factory, targetUri, dlUrl, passSize, staged));
+            postMain(() -> {
+                try { startDownloadChain(context, downloadItem, factory, targetUri, dlUrl, passSize, staged); }
+                catch (Throwable t) {
+                    reportPersistenceError("transfer preparation", t);
+                    IO.execute(() -> {
+                        DownloadTask handle = handles.get(downloadItem.getUuid());
+                        if (handle != null) handle.cancel();
+                        else { try { factory.abandonWrite(); } catch (Exception ignored) {} }
+                        complete(downloadItem, false);
+                    });
+                }
+            });
+            } catch (Throwable t) {
+                if (preparing[0] != null) {
+                    try { preparing[0].abandonWrite(); } catch (Exception ignored) {}
+                }
+                reportPersistenceError("storage preparation", t);
+                complete(downloadItem, false);
+            }
         });
     }
 
@@ -1146,6 +1339,7 @@ public class Manager {
                                 mContext.getString(R.string.aria2_task_sent, downloadItem.getName())));
             }
         }, throwable -> {
+            PageQueueDiagnostics.failure("aria2", downloadItem, throwable);
             Common.showLog("[ARIA2] dispatch failed: " + throwable);
             if (!downloadItem.isSilent()) {
                 DownloadToasts.show(DownloadToastKind.ARIA2, mContext.getString(
@@ -1153,17 +1347,34 @@ public class Manager {
             }
             complete(downloadItem, false);
         }, () -> {
-            handles.remove(itemUuid);
             Common.showLog("[ARIA2] onFinally uuid=" + itemUuid);
-            postMain(this::pumpAvailableSlots);
+            workerTerminated(downloadItem);
         });
         registerHandle(itemUuid, d);
         d.start(IO);
     }
 
+    /** Called before publishing/removing a completed page. Failed visibility commit retains staging. */
+    static void finishPageOutput(DownloadFileFactory factory, File stageDir, String stageKey) {
+        factory.finishWrite();
+        if (stageDir != null) StageStore.clear(stageDir, stageKey);
+    }
+
     private void startDownloadChain(Context context, DownloadItem downloadItem,
             DownloadFileFactory factory, Uri targetUri, String dlUrl,
             long passSize, boolean staged) {
+        synchronized (this) {
+            if (!canContinueAttempt(downloadItem)) {
+                // Preparation can outlive a pause/clear. Clean up off main before releasing its slot.
+                IO.execute(() -> {
+                    try { factory.abandonWrite(); } catch (Exception ignored) {}
+                    finally {
+                        workerTerminated(downloadItem);
+                    }
+                });
+                return;
+            }
+        }
         // 下载专用 H1.1 client，规避 H2 stream priority 串行化（详见 getDownloadOkHttpClient）。
         OkHttpClient client = getDownloadOkHttpClient();
 
@@ -1206,6 +1417,15 @@ public class Manager {
         }
 
         DownloadTask d = DownloadTask.create(emitter -> {
+            ceui.pixiv.imageloader.OriginalFileLease source = null;
+            java.io.Closeable legacyCache = null;
+            if (downloadItem.getIllust().isGif()) {
+                legacyCache = ceui.pixiv.ui.bulk.UgoiraCacheAccess.tryRead();
+                if (legacyCache == null) {
+                    emitter.onError(new IOException("动图缓存正在清理，请重试"));
+                    return;
+                }
+            }
             try {
                 // 必须在可取消的 DownloadTask Body 内等待，不能占住主线程，也不能在
                 // handles 注册前等待。staged 的本地复制会从 0 覆写，旧 partial 不会混入。
@@ -1213,9 +1433,9 @@ public class Manager {
                 Timber.tag("SharedImageDownload").d("LOOKUP illustId=%d page=%d image=%s",
                         downloadItem.getIllust().getId(), downloadItem.getIndex(),
                         dlUrl.substring(dlUrl.lastIndexOf('/') + 1));
-                if (!downloadItem.getIllust().isGif() && (staged || passSize == 0)) {
+                if (!downloadItem.getIllust().isGif()) {
                     final int[] lastLoggedPercent = {-1};
-                    cachedFile = ImageLoaderV3.awaitExistingFile(dlUrl, percent -> {
+                    source = ImageLoaderV3.acquireOriginalFile(dlUrl, percent -> {
                         reportProgress(downloadItem, percent, 0L, 0L, false, emitter);
                         int bucket = percent / 10;
                         if (bucket != lastLoggedPercent[0]) {
@@ -1225,6 +1445,7 @@ public class Manager {
                                     downloadItem.getIllust().getId(), downloadItem.getIndex(), percent);
                         }
                     });
+                    cachedFile = source.getFile();
                 }
                 if (emitter.isDisposed()) return;
                 Timber.tag("SharedImageDownload").d(
@@ -1250,7 +1471,7 @@ public class Manager {
                     // 留在同一个任务里，句柄、stage 单主锁、单独放行都还在；暂停 / 挂起取消了任务的话
                     // emitter 已 dispose，不会重连。不弹 toast、不发 DOWNLOAD_FAILED，对用户是"没发生过"。
                     boolean resumable = staged || "file".equals(targetUri.getScheme());
-                    if (emitter.isDisposed() || !resumable
+                    if (emitter.isDisposed() || !downloadItem.getIllust().isGif() || !resumable
                             || !shouldSilentlyRetryAfterReadTimeout(downloadItem, e)) {
                         throw e;
                     }
@@ -1272,6 +1493,9 @@ public class Manager {
                 if (!emitter.isDisposed()) {
                     emitter.onError(e);
                 }
+            } finally {
+                if (source != null) source.close();
+                if (legacyCache != null) try { legacyCache.close(); } catch (IOException ignored) { }
             }
         },
         // 完成回调保持在 IO 线程（DownloadTask 在 Body 跑完后同线程交付），Gson 序列化 +
@@ -1279,19 +1503,15 @@ public class Manager {
         s -> {
             Common.showLog("downloadOne " + s);
 
-            // ===== CRITICAL: 把 content.remove 提到最前 =====
-            // QueueDownloadManager.awaitIllustSettled 是靠"item 从 Manager.content
-            // 消失"判断 illust 完成的。下面的 Gson 序列化 / Room insert /
-            // factory.finishWrite() / complete() 任何一行 throw 都会让原本在
-            // 末尾 schedule 的 content.remove **永远不会被 queue 上 main 线程**。
-            // 单页文件已经写盘成功（一行字节流早就 flush 了），但 await 看到这个
-            // page 还在 content 里 → 永远不 return → consumer 走不到
-            // dao.updateStatus(SUCCESS) → 批量队列 list 不消失，最终 stall
-            // timeout 把它标 FAILED（FAILED 行 SQL 也不过滤，list 仍然不消失）。
-            // 用户看到的就是"图都下成功了 但队列不少"。
-            //
-            // 把 remove 排到最前面，独立 Runnable，跟后续 IO 工作解耦：哪怕后面
-            // 任何步骤 throw，main thread 都已经把这条 item 从 content 取出了。
+            // Commit storage visibility before publishing success or removing the active row.
+            // Throwing here reaches DownloadTask.onError and keeps this page visible as FAILED.
+            // A failed commit retains its stage for retry and must never produce a core success tombstone.
+            finishPageOutput(factory, stageDir, stageKey);
+            if (downloadItem.getIllust().isGif() && downloadItem.isAutoSave()) {
+                // Compatibility for an already-live old ZIP worker; wait for intent persistence only.
+                ceui.pixiv.ui.bulk.QueuedUgoira.get(context).importLegacy(downloadItem, false);
+            }
+
             postMain(() -> {
                 int sizeBefore;
                 boolean removed;
@@ -1308,13 +1528,12 @@ public class Manager {
 
             if(downloadItem.getIllust().isGif()){
                 Shaft.getMMKV().encode(Params.ILLUST_ID + "_" + downloadItem.getIllust().getId(), true);
-                postMain(() ->
-                    PixivOperate.unzipAndPlay(context, downloadItem.getIllust(), downloadItem.isAutoSave()));
+                if (!downloadItem.isAutoSave()) postMain(() ->
+                    PixivOperate.unzipAndPlay(context, downloadItem.getIllust(), false));
             }
 
-            // 下面三块每块独立 try/catch：单条失败别牵连其它。最关键的 content.remove
-            // 已经在上面发出去了，这里都是"附加完成动作"，断了任意一条都不至于让
-            // 整个 illust 的下载流程卡死。
+            // Storage commit succeeded. Record enrichment failures do not invalidate the file;
+            // each is isolated so the queue can acknowledge successful output.
             DownloadEntity downloadEntity = null;
             // 动图这条 DownloadItem 下的是 app cache 里的中间 zip
             // （Android10DownloadFactory22 → LegacyFile.gifZipFile），不是用户拿到的成品。
@@ -1366,17 +1585,6 @@ public class Manager {
                 }
             }
 
-            try {
-                factory.finishWrite();
-                // staged 的 stage（.part + manifest）在 finishWrite 成功后才清：清早了，
-                // dispose 恰好丢弃这条 onNext 时（observeOn 跳变窗口）目标行悬挂 pending、
-                // stage 又没了，冷启动 cleaner 会把写满的文件当孤儿删掉 → 整段重下。
-                // finishWrite 抛错时同理保留 stage —— pending 行终会被 cleaner 回收，
-                // 下次尝试凭完整 stage 走 skipNetwork 直接重新 commit。clear 幂等。
-                if (staged) {
-                    StageStore.clear(stageDir, stageKey);
-                }
-            } catch (Throwable t) { Common.showLog("[DL] finishWrite failed: " + t); }
             // 可选:把作品标签写进 JPEG 的 XMP 关键词(issue #938)。开关默认关,只处理 JPEG,
             // 内部包 try/catch —— 写元数据失败绝不影响这条已成功的下载。gif 会被扩展名过滤掉。
             // 开关前置判断:默认关时这条下载热路径零额外开销(不建 tag 列表、不读文件)。
@@ -1416,6 +1624,7 @@ public class Manager {
             });
         }, throwable -> {
             //下载失败，处理相关逻辑
+            PageQueueDiagnostics.failure("transfer-or-commit", downloadItem, throwable);
             Common.showLog("Manager download error: " + throwable.getMessage());
 
             if (!downloadItem.isSilent()) {
@@ -1454,12 +1663,20 @@ public class Manager {
         }, () -> {
             // 这条传完了：释放 stage 单主锁 + 把句柄从表里移除，主线程上 pump 下一个
             // 空闲槽位。onFinally 对 onNext / onError / cancel(暂停) 都会跑，在这里释放锁最稳。
-            if (acquiredStage) {
-                activeStageKeys.remove(stageKey);
-            }
-            handles.remove(itemUuid);
-            Common.showLog("onFinally uuid=" + itemUuid);
-            postMain(this::pumpAvailableSlots);
+            IO.execute(() -> {
+                try {
+                    DownloadTask ended = handles.get(itemUuid);
+                    if (ended != null && ended.isCancelled()
+                            && !downloadItem.isSuccess()) {
+                        factory.abandonWrite();
+                    }
+                } catch (Exception e) {
+                    Timber.tag("ContentQueue").w(e, "Cancelled output cleanup failed");
+                } finally {
+                    if (acquiredStage) activeStageKeys.remove(stageKey);
+                    workerTerminated(downloadItem);
+                }
+            });
         });
         // 先登记句柄、再启动：极快路径（stage 已完整，commit 不走网络）会在主线程执行到
         // 这一行之前就跑完 onFinally → handles.remove。先注册保证 remove 永远晚于 put，
@@ -1623,6 +1840,11 @@ public class Manager {
                 }
             }
 
+            if (cachedFile != null) {
+                // The complete copied stage is a recoverable source even if final storage commit fails.
+                StageStore.writeManifest(metaFile, StageStore.buildManifest(dlUrl, null, null, expectedTotal));
+            }
+
             // —— commit：延迟 insert 目标行，写 stage → 目标；成功后删 stage + manifest ——
             Uri targetUri = factory.insert();
             if (targetUri == null) {
@@ -1663,6 +1885,7 @@ public class Manager {
     private void runDirectTransfer(Context context, DownloadItem downloadItem, File cachedFile,
             Uri targetUri, String dlUrl, long passSize, OkHttpClient client,
             DownloadEmitter emitter) throws Exception {
+        if (cachedFile != null) passSize = 0L;
         Response response = null;
         InputStream inputStream = null;
         OutputStream outputStream = null;
@@ -1986,4 +2209,5 @@ public class Manager {
         activeStageKeys.remove(StageStore.keyForUrl(url));
     }
 }
+
 

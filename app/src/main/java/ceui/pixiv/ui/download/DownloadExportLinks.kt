@@ -110,19 +110,11 @@ internal object DownloadExportLinks {
                 runCatching {
                     val ts = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
                     val rawPath = RelativePath.parse("ShaftFiles/pixiv-links-$ts.txt")
-                    val handle = DownloadsRegistry.downloads.openRaw(
-                        Bucket.Log, rawPath, "text/plain",
-                    ) ?: error("openRaw returned null")
-                    try {
-                        handle.stream.use { os ->
-                            OutputStreamWriter(os, Charsets.UTF_8).use { it.write(text) }
-                        }
-                        handle.onFinish()
-                    } catch (e: Exception) {
-                        runCatching { handle.onAbort() }
-                        throw e
-                    }
-                    SaveResult(handle.uri, rawPath.joinTo())
+                    val outputs = ceui.pixiv.download.copy.QueuedLocalOutputs.get(ctx)
+                    val ticket = ceui.pixiv.download.copy.QueuedLocalOutputs.text(ctx, Bucket.Log, rawPath, "text/plain", text)
+                    check(outputs.await(ticket)) { "链接导出失败，请在下载管理中重试" }
+                    val receipt = outputs.receipt(ticket)
+                    SaveResult(Uri.parse(requireNotNull(receipt.receipt)), rawPath.joinTo())
                 }
             }
             result.fold(
@@ -187,3 +179,4 @@ internal object DownloadExportLinks {
  */
 internal fun originalUrlsOf(illust: Illust): List<String> =
     DownloadRecordSlim.resolveOriginalUrls(illust)
+

@@ -19,7 +19,6 @@ import ceui.pixiv.imageloader.PageImageSourceResolver
 import ceui.pixiv.imageloader.awaitFile
 import ceui.pixiv.ui.upscale.decodeBoundedArgb
 import java.io.File
-import java.io.FileOutputStream
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -106,7 +105,6 @@ class ImageFilterViewModel(app: Application, private val saved: SavedStateHandle
     /** 舞台此刻挂着的那一帧（主线程写、渲染线程读）：渲染只挑既没挂上、也不是刚发布的缓冲来写。 */
     @Volatile private var displayed: Bitmap? = null
 
-    private var lastExport: Pair<FilterState, File>? = null
 
     fun start(illust: Illust, page: Int, previewMaxEdge: Int, thumbPx: Int) {
         if (this::illust.isInitialized) return
@@ -304,17 +302,17 @@ class ImageFilterViewModel(app: Application, private val saved: SavedStateHandle
         _exporting.value = kind
         viewModelScope.launch {
             val result = try {
-                val file = renderFull(s)
+                val app = getApplication<Application>()
+                val exported = ceui.pixiv.download.copy.QueuedImageDerivatives.get(app)
+                    .filter(illust, page, source ?: error("source not loaded"), s, kind == FilterExport.SHARE)
                 when (kind) {
                     FilterExport.SAVE -> {
-                        saveToGallery(file, s)
                         FilterExportResult.Saved
                     }
                     FilterExport.SHARE -> {
-                        val app = getApplication<Application>()
                         FilterExportResult.Share(
-                            FileProvider.getUriForFile(app, "${app.packageName}.provider", file),
-                            if (file.extension == "png") "image/png" else "image/jpeg",
+                            FileProvider.getUriForFile(app, "${app.packageName}.provider", File(requireNotNull(exported.uri.path))),
+                            exported.mime,
                         )
                     }
                 }
@@ -327,51 +325,6 @@ class ImageFilterViewModel(app: Application, private val saved: SavedStateHandle
             }
             _exporting.value = null
             _results.send(result)
-        }
-    }
-
-    /** 全分辨率渲染并编码到 FileProvider 暴露的缓存目录；同一组参数只算一次。 */
-    private suspend fun renderFull(s: FilterState): File {
-        lastExport?.let { (state, file) -> if (state == s && file.exists()) return file }
-        val src = source ?: error("source not loaded")
-        val app = getApplication<Application>()
-        val file = withContext(Dispatchers.Default) {
-            val bitmap = decodeBoundedArgb(src, "filter", mutable = true)?.toArgb8888(mutable = true)
-                ?: error("decode failed")
-            try {
-                NativeImageFilter.render(bitmap, bitmap, s)
-                val png = bitmap.hasAlpha()
-                val dir = File(app.externalCacheDir ?: app.cacheDir, "images").apply { mkdirs() }
-                val out = File(dir, "${illust.id}_p${page}_${s.fileTag()}.${if (png) "png" else "jpg"}")
-                val tmp = File(dir, out.name + ".part")
-                FileOutputStream(tmp).buffered().use { stream ->
-                    val format = if (png) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG
-                    check(bitmap.compress(format, JPEG_QUALITY, stream)) { "encode failed" }
-                }
-                check(tmp.renameTo(out) || (out.delete() && tmp.renameTo(out))) { "rename failed" }
-                out
-            } finally {
-                bitmap.recycle()
-            }
-        }
-        // 旧成品不删：可能刚分享出去，对方 App 还没读完。缓存目录交给系统回收。
-        lastExport = s to file
-        return file
-    }
-
-    private suspend fun saveToGallery(file: File, s: FilterState) = withContext(Dispatchers.IO) {
-        val png = file.extension == "png"
-        // open 返回 null = 用户选了「跳过已存在」且同名文件在：算已保存。
-        val handle = DownloadsRegistry.downloads.openDerived(
-            DownloadItems.illustFiltered(illust, page, png),
-            "_filter_${s.fileTag()}",
-        ) ?: return@withContext
-        try {
-            handle.stream.use { out -> file.inputStream().use { it.copyTo(out) } }
-            handle.onFinish()
-        } catch (t: Throwable) {
-            handle.onAbort()
-            throw t
         }
     }
 
@@ -391,3 +344,4 @@ class ImageFilterViewModel(app: Application, private val saved: SavedStateHandle
         const val KEY_TOOL = "filter_adjust_tool"
     }
 }
+

@@ -82,4 +82,23 @@ class OriginalImageCacheManagerTest {
         committed.writeBytes(ByteArray(0))
         assertNull(OriginalImageCacheManager.find(cacheDir, url))
     }
+    @Test fun `copy reference prevents quota eviction until every consumer releases it`() {
+        val url = "https://example.invalid/original.jpg?version=1"
+        val a = OriginalImageCacheManager.pin(cacheDir, stagingDir, url)
+        val b = OriginalImageCacheManager.pin(cacheDir, stagingDir, url)
+        val part = StageStore.partFile(stagingDir, StageStore.keyForUrl(url)).apply { writeText("complete source") }
+        val committed = OriginalImageCacheManager.commit(cacheDir, stagingDir, url, part)
+        val unrelated = File(cacheDir, "unrelated.jpg").apply { writeText("old data") }
+        try {
+            OriginalImageCacheManager.trimDir(cacheDir, 0)
+            assertTrue(committed.exists()); assertFalse(unrelated.exists())
+            a.close(); a.close() // idempotent close must not withdraw the second consumer
+            OriginalImageCacheManager.trimDir(cacheDir, 0)
+            assertTrue(committed.exists())
+        } finally { a.close(); b.close() }
+        OriginalImageCacheManager.trimDir(cacheDir, 0)
+        assertFalse(committed.exists())
+    }
+
 }
+

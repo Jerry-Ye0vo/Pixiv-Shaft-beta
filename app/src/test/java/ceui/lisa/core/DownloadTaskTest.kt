@@ -105,6 +105,57 @@ class DownloadTaskTest {
     }
 
     @Test
+    fun `cancel keeps resources until an uncooperative body actually exits`() {
+        val started = CountDownLatch(1)
+        val interrupted = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val finished = CountDownLatch(1)
+        val task = DownloadTask.launch(io, {
+            started.countDown()
+            while (release.count > 0) {
+                try { release.await() }
+                catch (_: InterruptedException) { interrupted.countDown() }
+            }
+        }, {}, {}, { finished.countDown() })
+        try {
+            assertTrue(started.await(2, TimeUnit.SECONDS))
+            task.cancel()
+            assertTrue(interrupted.await(2, TimeUnit.SECONDS))
+            assertEquals("Cancellation is not worker termination", 1L, finished.count)
+        } finally { release.countDown() }
+        assertTrue(finished.await(2, TimeUnit.SECONDS))
+        assertFalse(probeInterruptFlag())
+    }
+
+    @Test
+    fun `cancel during output commit defers finalization until commit returns`() {
+        val committing = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val finished = CountDownLatch(1)
+        val task = DownloadTask.launch(io, { it.onNext("output") }, {
+            committing.countDown()
+            release.await(2, TimeUnit.SECONDS)
+        }, {}, { finished.countDown() })
+        try {
+            assertTrue(committing.await(2, TimeUnit.SECONDS))
+            task.cancel()
+            assertEquals(1L, finished.count)
+        } finally { release.countDown() }
+        assertTrue(finished.await(2, TimeUnit.SECONDS))
+    }
+
+    @Test
+    fun `executor rejection reports failure and releases reservation`() {
+        io.shutdown()
+        val error = AtomicReference<Throwable>()
+        val finished = AtomicInteger()
+        DownloadTask.launch(io, { throw AssertionError("must not run") }, {},
+            { error.set(it) }, { finished.incrementAndGet() })
+        assertTrue(error.get() is java.util.concurrent.RejectedExecutionException)
+        assertEquals(1, finished.get())
+    }
+
+    @Test
     fun `racing cancel against phase transition never leaks an interrupt onto the pool thread`() {
         repeat(500) { i ->
             val done = CountDownLatch(1)
@@ -119,3 +170,4 @@ class DownloadTaskTest {
         }
     }
 }
+

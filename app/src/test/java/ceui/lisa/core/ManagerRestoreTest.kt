@@ -125,11 +125,16 @@ class ManagerRestoreTest {
         }
         awaitCondition {
             synchronized(manager) {
-                ReflectionHelpers.getField<Any?>(manager, "restoreLiveUrls") == null
+                ReflectionHelpers.getField<Any?>(manager, "restoreLiveKeys") == null
             }
         }
         assertTrue(manager.contentSnapshot().isEmpty())
+        ReflectionHelpers.getField<java.util.concurrent.ExecutorService>(manager, "queueWrites")
+            .submit {}.get(10, TimeUnit.SECONDS)
         assertEquals(0L, db.downloadDao().getDownloadingHighWaterMark())
+        ReflectionHelpers.getField<java.util.concurrent.ExecutorService>(manager, "queueWrites").shutdown()
+        ReflectionHelpers.getField<PageQueueOwner>(manager, "pageQueue").close()
+        RuntimeEnvironment.getApplication().deleteDatabase("content_queue.db")
     }
 
     /** 带 state / paused 的记录，用来验证冷启动恢复后的状态归一。 */
@@ -174,3 +179,4 @@ class ManagerRestoreTest {
         }
     }
 }
+

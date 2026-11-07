@@ -351,3 +351,4 @@ object EpubRetryDialogHelper {
         show()
     }
 }
+

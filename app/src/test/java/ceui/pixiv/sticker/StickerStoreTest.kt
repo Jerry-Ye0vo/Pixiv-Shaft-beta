@@ -39,6 +39,17 @@ class StickerStoreTest {
     private fun download(pkg: StickerPackage, file: File, progress: (Long) -> Unit) {
         file.writeBytes(bytes.getValue(pkg.url)); progress(file.length())
     }
+    @Test fun `sticker extraction claims local writes without holding them during network callbacks`() {
+        val catalog = catalog(); val store = StickerStore(folder.newFolder())
+        var writing = false; var stages = 0
+        val ready = store.prepare(catalog, { pkg, file, progress ->
+            assertFalse(writing); download(pkg, file, progress)
+        }, { _, _, _ -> }, writeStage = { body ->
+            assertFalse(writing); writing = true; stages++
+            try { body() } finally { writing = false }
+        })
+        assertTrue(stages > 4); assertTrue(store.hasReadyMarker(ready.generation))
+    }
 
     @Test fun `all four ZIPs and extraction markers precede the single ready marker`() {
         val catalog = catalog()
@@ -174,3 +185,4 @@ class StickerStoreTest {
         assertThrows(IllegalArgumentException::class.java) { catalog.copy(packs = emptyMap()).validate() }
     }
 }
+

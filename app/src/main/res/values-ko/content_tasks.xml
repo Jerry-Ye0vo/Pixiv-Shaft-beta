@@ -1,0 +1,19 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="content_task_choose_format">계속하려면 내보내기 형식을 선택하세요</string>
+    <string name="content_task_processing">처리 중: 페이지를 나가도 계속됩니다</string>
+    <string name="content_task_persisted">작업 저장됨</string>
+    <string name="content_task_running">진행 중</string>
+    <string name="content_task_paused">일시 중지됨</string>
+    <string name="content_task_failed">실패</string>
+    <string name="content_task_done">완료</string>
+    <string name="content_task_cancelled">취소됨</string>
+    <string name="content_task_stopping">중지 중</string>
+    <string name="content_task_waiting">대기 중</string>
+    <string name="content_task_resume">계속</string>
+    <string name="content_task_pause">일시 중지</string>
+    <string name="content_task_cancel">작업 취소</string>
+    <string name="content_task_recent">최근 작업</string>
+    <string name="content_task_finish_partial">가져오기를 중지하고 기존 장 저장</string>
+    <string name="content_task_recent_empty">다른 최근 작업 없음</string>
+</resources>

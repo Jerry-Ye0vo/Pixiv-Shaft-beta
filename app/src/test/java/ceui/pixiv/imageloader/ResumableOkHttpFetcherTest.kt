@@ -60,6 +60,12 @@ class ResumableOkHttpFetcherTest {
     )
 
     private fun testUrl(): String = server.url("/img-original/img/2026/01/01/00/00/00/12345_p0.jpg").toString()
+    @Test fun `queued source preserves HTTP status for Muzei invalid artwork handling`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(404))
+        try { testFetcher().fetch(testUrl()) {}; org.junit.Assert.fail("404 must fail") }
+        catch (error: ImageHttpException) { assertEquals(404, error.statusCode) }
+        assertEquals(1, server.requestCount)
+    }
 
     @Test
     fun `fresh download from scratch commits completed file`() = runTest {
@@ -128,7 +134,7 @@ class ResumableOkHttpFetcherTest {
         val metaFile = StageStore.metaFile(stagingDir, key)
 
         FileOutputStream(partFile).use { it.write(payload) }
-        StageStore.writeManifest(metaFile, StageStore.buildManifest(url, etag, null, 1000L))
+        StageStore.writeManifest(metaFile, StageStore.buildManifest(url, etag, null, -1L))
 
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
@@ -203,4 +209,48 @@ class ResumableOkHttpFetcherTest {
         assertTrue(partFile.exists())
         assertTrue(partFile.length() in 1..400)
     }
+    @Test fun `validated legacy partial is adopted with its validator and original recovery file intact`() = runTest {
+        val legacy = File.createTempFile("legacy-stage-", "dir").apply { delete(); mkdirs() }
+        val url = testUrl()
+        val key = StageStore.keyForUrl(url)
+        val oldPart = StageStore.partFile(legacy, key).apply { writeBytes(payload.copyOfRange(0, 500)) }
+        StageStore.writeManifest(StageStore.metaFile(legacy, key), StageStore.buildManifest(url, etag, null, 1000))
+        server.enqueue(MockResponse().setResponseCode(206).setHeader("Content-Range", "bytes 500-999/1000")
+            .setHeader("ETag", etag).setBody(Buffer().write(payload.copyOfRange(500,1000))))
+        try {
+            val fetcher = ResumableOkHttpFetcher(clientProvider = { client },
+                cacheDirProvider = { cacheDir }, stagingDirProvider = { stagingDir },
+                legacyStagingDirProvider = { legacy })
+            val result = fetcher.fetch(url) {}
+            val request = server.takeRequest(2, TimeUnit.SECONDS)!!
+            assertEquals("bytes=500-", request.getHeader("Range"))
+            assertEquals(etag, request.getHeader("If-Range"))
+            assertArrayEquals(payload, result.readBytes())
+            assertTrue(oldPart.exists()) // old queue can still recover if import or copy is interrupted
+        } finally { legacy.deleteRecursively() }
+    }
+
+    @Test fun `legacy stage for a different exact URL is never adopted`() {
+        val legacy = File.createTempFile("legacy-stage-", "dir").apply { delete(); mkdirs() }
+        val url = testUrl()
+        val key = StageStore.keyForUrl(url)
+        try {
+            StageStore.partFile(legacy, key).writeBytes(payload)
+            StageStore.writeManifest(StageStore.metaFile(legacy, key), StageStore.buildManifest(url + "?other", etag, null, 1000))
+            testFetcher().adoptLegacyStage(url, stagingDir, legacy)
+            assertFalse(StageStore.partFile(stagingDir, key).exists())
+        } finally { legacy.deleteRecursively() }
+    }
+
+    @Test fun `complete validated stage commits offline without another HTTP request`() = runTest {
+        val url = testUrl()
+        val key = StageStore.keyForUrl(url)
+        StageStore.partFile(stagingDir, key).writeBytes(payload)
+        StageStore.writeManifest(StageStore.metaFile(stagingDir, key), StageStore.buildManifest(url, etag, null, 1000))
+        val result = testFetcher().fetch(url) {}
+        assertArrayEquals(payload, result.readBytes())
+        assertEquals(0, server.requestCount)
+    }
+
 }
+

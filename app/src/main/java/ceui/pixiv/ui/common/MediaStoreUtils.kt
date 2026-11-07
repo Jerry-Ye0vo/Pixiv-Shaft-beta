@@ -18,6 +18,7 @@ import com.blankj.utilcode.util.ImageUtils
 import com.hjq.toast.Toaster
 import timber.log.Timber
 import java.io.File
+import kotlinx.coroutines.launch
 import java.io.FileInputStream
 import java.io.IOException
 
@@ -36,31 +37,14 @@ private fun mimeFromName(name: String): String {
 }
 
 fun saveImageToGallery(context: Context, imageFile: File, displayName: String) {
-    runCatching {
-        val handle = ceui.pixiv.download.DownloadsRegistry.downloads.openRaw(
-            ceui.pixiv.download.model.Bucket.Illust,
-            ceui.pixiv.download.model.RelativePath.parse("ShaftImages/$displayName"),
-            // MediaStore.MIME_TYPE rejects wildcards on Q+, so resolve a concrete
-            // type from the extension. Falls back to image/jpeg for unknown ones.
-            mimeFromName(displayName),
-        ) ?: return@runCatching
-        handle.stream.use { outputStream ->
-            FileInputStream(imageFile).use { inputStream ->
-                inputStream.copyTo(outputStream)
-            }
-        }
-        // Tell the backend the bytes are committed: clears IS_PENDING on
-        // MediaStore writes and triggers MediaScanner for SAF / legacy paths.
-        // Without this, gallery apps may not see the image until next rescan.
-        handle.onFinish()
-        Toaster.show(context.getString(R.string.string_181))
-    }.onFailure { ex ->
-        when (ex) {
-            is IOException -> Timber.e("SaveImage IOException while saving image: ${ex.message}")
-            is SecurityException -> Timber.e("SaveImage SecurityException: Permission issue: ${ex.message}")
-            else -> Timber.e("SaveImage Unexpected error: ${ex.message}")
-        }
-        Toaster.show(context.getString(R.string.save_image_failed, ex.message ?: ex.javaClass.simpleName))
+    val app = context.applicationContext
+    val ticket = ceui.pixiv.download.copy.QueuedLocalOutputs.file(app, ceui.pixiv.download.model.Bucket.Illust,
+        ceui.pixiv.download.model.RelativePath.parse("ShaftImages/$displayName"), mimeFromName(displayName), imageFile)
+    kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO).launch {
+        val outputs = ceui.pixiv.download.copy.QueuedLocalOutputs.get(app)
+        runCatching { outputs.await(ticket) }.fold(
+            onSuccess = { ok -> Toaster.show(app.getString(if (ok) R.string.string_181 else R.string.save_image_failed, "")) },
+            onFailure = { error -> Toaster.show(app.getString(R.string.save_image_failed, error.message ?: error.javaClass.simpleName)) })
     }
 }
 
@@ -127,24 +111,17 @@ fun deleteImageById(context: Context, imageId: Long): Boolean {
  * so callers must not strip the directory portion or the user's chosen folder
  * structure (`byAuthor`, `byDate`, `detailed`, …) is silently lost.
  */
+@androidx.annotation.WorkerThread
 fun saveToDownloadsScopedStorage(
     context: Context,
     path: ceui.pixiv.download.model.RelativePath,
     content: String,
 ): Boolean {
     return try {
-        val handle = ceui.pixiv.download.DownloadsRegistry.downloads.openRaw(
-            ceui.pixiv.download.model.Bucket.Novel,
-            path,
-            "text/plain",
-        ) ?: return false
-        handle.stream.use { it.write(content.toByteArray()) }
-        handle.onFinish()
-        true
+        val ticket = ceui.pixiv.download.copy.QueuedLocalOutputs.text(context,
+            ceui.pixiv.download.model.Bucket.Novel, path, "text/plain", content)
+        ceui.pixiv.download.copy.QueuedLocalOutputs.awaitBlocking(context, ticket)
     } catch (e: Throwable) {
-        // Low-level helper — never crashes, just reports failure to caller via
-        // `false`. Caller decides whether/how to surface the error (e.g. single
-        // download path toasts; batch path collects into a failures dialog).
         Timber.e(e, "saveToDownloadsScopedStorage failed for ${path.joinTo()}")
         false
     }
@@ -181,3 +158,4 @@ fun getTxtFileIdInDownloads(context: Context, displayName: String): Long? {
         Timber.e(ex)
     }.getOrNull() // 如果发生异常，返回 null
 }
+

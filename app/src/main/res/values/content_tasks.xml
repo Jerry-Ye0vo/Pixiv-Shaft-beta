@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="content_task_choose_format">选择导出格式后继续</string>
+    <string name="content_task_processing">正在处理，离开页面后继续</string>
+    <string name="content_task_persisted">任务已保存</string>
+    <string name="content_task_running">进行中</string>
+    <string name="content_task_paused">已暂停</string>
+    <string name="content_task_failed">失败</string>
+    <string name="content_task_done">已完成</string>
+    <string name="content_task_cancelled">已取消</string>
+    <string name="content_task_stopping">正在停止</string>
+    <string name="content_task_waiting">等待中</string>
+    <string name="content_task_resume">继续</string>
+    <string name="content_task_pause">暂停</string>
+    <string name="content_task_cancel">取消任务</string>
+    <string name="content_task_recent">最近任务</string>
+    <string name="content_task_finish_partial">停止抓取并保存已有章节</string>
+    <string name="content_task_recent_empty">暂无其他任务记录</string>
+</resources>

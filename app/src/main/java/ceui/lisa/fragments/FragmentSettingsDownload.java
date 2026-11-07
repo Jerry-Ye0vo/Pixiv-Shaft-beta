@@ -402,6 +402,7 @@ public class FragmentSettingsDownload extends SettingsPageFragment<FragmentSetti
                                     Common.showLog("什么也不做");
                                 } else {
                                     Shaft.sSettings.setDownloadLimitType(which);
+                                    ceui.lisa.notification.NetWorkStateReceiver.onDownloadSettingsChanged(mContext);
                                     baseBind.downloadLimitType.setText(DOWNLOAD_START_TYPE_NAMES[DownloadLimitTypeUtil.getCurrentStatusIndex()]);
                                     Common.showToast(getString(R.string.string_428));
                                     Local.setSettings(Shaft.sSettings);
@@ -562,3 +563,4 @@ public class FragmentSettingsDownload extends SettingsPageFragment<FragmentSetti
         refreshAria2Label();
     }
 }
+

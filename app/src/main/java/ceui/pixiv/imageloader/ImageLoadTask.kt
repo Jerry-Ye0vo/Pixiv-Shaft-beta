@@ -67,6 +67,15 @@ class ImageLoadTask(
     val currentFile: File? get() = _state.value.fileOrNull?.takeIf { it.isUsableImageFile() }
 
     private var job: Job? = null
+    @Volatile private var attempt = 0L
+    private var awaiters = 0
+
+    /** LRU eviction may withdraw an unused preview, while visible observers and file consumers stay. */
+    @Synchronized internal fun releaseUnused() {
+        if (awaiters > 0 || _state.subscriptionCount.value > 0 || job?.isActive != true) return
+        attempt++; job?.cancel(); job = null
+        if (_state.value is ImageLoadState.Loading) _state.value = ImageLoadState.Idle
+    }
 
     /**
      * 幂等启动:正在下载/已成功/已失败都不重复触发。B、C 各自 start() 时,只有第一个真正拉起下载,
@@ -88,13 +97,15 @@ class ImageLoadTask(
             else -> Unit
         }
         Timber.d("[ImgV3] task start url=$shortUrl")
-        job = scope.launch { runDownload() }
+        val token = ++attempt
+        job = scope.launch { runDownload(token) }
     }
 
     /** 失败/需要重来时重置状态并重新下载。 */
     @Synchronized
     fun retry() {
         Timber.d("[ImgV3] task retry url=$shortUrl")
+        attempt++ // invalidate callbacks before cancelling the old consumer
         job?.cancel()
         job = null
         _state.value = ImageLoadState.Idle
@@ -106,6 +117,8 @@ class ImageLoadTask(
      * 供「保存到相册」等下游用例复用**同一个**共享任务的结果,不重复下载。
      */
     suspend fun awaitFile(onProgress: (Int) -> Unit = {}): File {
+        synchronized(this) { awaiters++ }
+        try {
         // 上一次失败就重来一次(对齐旧 TaskPool「取到 errored 任务即换新重下」的行为);否则幂等启动。
         // 这是显式「我要这个文件」的取用点(保存/AI),不是列表滚动,重试一次不会造成风暴。
         if (_state.value is ImageLoadState.Error) retry() else start()
@@ -123,10 +136,12 @@ class ImageLoadTask(
             is ImageLoadState.Error -> throw terminal.cause
             else -> error("unreachable non-terminal state: $terminal")
         }
+        } finally { synchronized(this) { awaiters-- } }
     }
 
-    private suspend fun runDownload() {
+    private suspend fun runDownload(token: Long) {
         val startMs = elapsedRealtime()
+        if (attempt != token) return
         _state.value = ImageLoadState.Loading(0)
         // 「图片加载也容许一次断流超时并静默重试」：读超时（对端沉默）不落 Error，静默重来一次 ——
         // 与下载侧同一套额度口径（每条任务只给一次，避免对端真挂了时无限重下）。
@@ -136,13 +151,14 @@ class ImageLoadTask(
             try {
                 val file = fetcher.fetch(request.url) { percent ->
                     // 只在下载中推进百分比,原子 CAS 避免覆盖已到来的终态。
-                    _state.update { if (it is ImageLoadState.Loading) ImageLoadState.Loading(percent) else it }
+                    _state.update { if (attempt == token && it is ImageLoadState.Loading) ImageLoadState.Loading(percent) else it }
                 }
                 // Success 的契约是「文件可用」:空文件(镜像站回 200 空 body 之类)若也进 Success,
                 // awaitFile() 的可用性谓词永远等不到终态、保存/AI/壁纸流程会无声挂死。这里改走 Error,可 retry。
                 if (!file.isUsableImageFile()) {
                     throw IOException("fetched file is missing or empty: ${file.path}")
                 }
+                if (attempt != token) return
                 _state.value = ImageLoadState.Success(file)
                 Timber.d("[ImgV3] task SUCCESS url=$shortUrl totalMs=${elapsedRealtime() - startMs} size=${file.length()}")
                 return
@@ -150,6 +166,7 @@ class ImageLoadTask(
                 Timber.d("[ImgV3] task CANCELLED url=$shortUrl")
                 throw ce
             } catch (ex: Exception) {
+                if (attempt != token) return
                 if (!stallRetryUsed && shouldRetryStall(ex)) {
                     stallRetryUsed = true
                     Timber.w("[ImgV3] task STALL retry url=$shortUrl cause=${ex.javaClass.simpleName}")
@@ -183,3 +200,4 @@ class ImageLoadTask(
 internal fun shouldSilentlyRetryImageStall(error: Throwable): Boolean =
     GlideImageFetcher.isReadTimeout(error) &&
         ceui.lisa.activities.Shaft.sSettings?.isImageLoadRetryOnStall == true
+

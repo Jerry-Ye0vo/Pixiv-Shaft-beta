@@ -73,6 +73,8 @@ class DownloadManagerV3Fragment : Fragment() {
     lateinit var queueDownloadManager: QueueDownloadManager
 
     private val sharedVm: DownloadManagerSharedViewModel by activityViewModels()
+    private val contentTasks by lazy { UnifiedContentTasks(requireContext()) }
+    private var contentRows = emptyList<ContentTaskRow>()
 
     private var tabs: TabLayout? = null
     private var pager: ViewPager2? = null
@@ -161,16 +163,19 @@ class DownloadManagerV3Fragment : Fragment() {
         toolbar.tintMenuIconsWhite()
         val exportItem = toolbar.menu.findItem(R.id.action_export)
         val pauseToggleItem = toolbar.menu.findItem(R.id.action_pause_toggle)
+        val contentHistoryId = android.view.Menu.FIRST + 87
+        toolbar.menu.add(0, contentHistoryId, 50, R.string.content_task_recent)
         val searchItem = toolbar.menu.findItem(R.id.action_search)
         val importItem = toolbar.menu.findItem(R.id.action_import)
 
         // 工具栏右侧按钮的动作 —— 图标与点击共用同一个现算值（口径 + 单测见 ActiveToolbarAction.kt /
         // ActivePauseToggle.kt）：只剩失败项时是「重试失败」，否则按 shouldResumeAll 定暂停 / 继续。
-        fun currentToolbarAction(): ActiveToolbarAction = resolveActiveToolbarAction(
-            Manager.get().contentSnapshot().toPauseToggleItems(),
-            queueDownloadManager.isPaused(),
-            queueDownloadManager.ugoiraInFlightFlow.value.isNotEmpty(),
-        )
+        fun currentToolbarAction(): ActiveToolbarAction {
+            val items = Manager.get().contentSnapshot()
+            val ugoira = queueDownloadManager.ugoiraInFlightFlow.value.isNotEmpty()
+            return resolveUnifiedToolbarAction(resolveActiveToolbarAction(items.toPauseToggleItems(),
+                queueDownloadManager.isPaused(), ugoira), items.isNotEmpty() || ugoira, contentRows)
+        }
 
         fun renderPauseToggle(action: ActiveToolbarAction) {
             pauseToggleItem?.setIcon(action.iconRes)
@@ -180,6 +185,7 @@ class DownloadManagerV3Fragment : Fragment() {
         setupDoneSearch(searchItem)
         toolbar.setOnMenuItemClickListener { item ->
             when (item.itemId) {
+                contentHistoryId -> { showContentTaskHistory(contentTasks); true }
                 R.id.action_export -> {
                     sharedVm.requestExport(pager.currentItem)
                     true
@@ -191,17 +197,20 @@ class DownloadManagerV3Fragment : Fragment() {
                     when (currentToolbarAction()) {
                         ActiveToolbarAction.RETRY -> {
                             Manager.get().retryAllFailed()
+                            contentTasks.resumeAll(retryOnly = true)
                         }
 
                         ActiveToolbarAction.RESUME -> {
                             // resumeByUser：用户触发的操作忽略网络状态，不走自动闸门
                             Manager.get().startAll()
                             queueDownloadManager.resumeByUser()
+                            contentTasks.resumeAll()
                         }
 
                         ActiveToolbarAction.PAUSE -> {
                             Manager.get().stopAll()
                             queueDownloadManager.pause()
+                            contentTasks.pauseAll()
                         }
                     }
                     true
@@ -260,16 +269,18 @@ class DownloadManagerV3Fragment : Fragment() {
                     .conflate()
                     .flowOn(Dispatchers.Default)
                     .distinctUntilChanged()
-                    .collect { renderPauseToggle(it) }
+                    .collect { renderPauseToggle(currentToolbarAction()) }
             }
         }
 
         // 实时刷新 tab 文案末尾的数字
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
-                sharedVm.snapshots().collect { s ->
+                combine(sharedVm.snapshots(), contentTasks.rows) { snapshot, rows -> snapshot to rows }.collect { (s, rows) ->
+                    contentRows = rows.filter { it.active }
+                    renderPauseToggle(currentToolbarAction())
                     setTabCount(0, s.queuePending + s.queueDownloading)
-                    setTabCount(1, s.activeCount)
+                    setTabCount(1, s.activeCount + contentRows.size)
                 }
             }
         }
@@ -403,3 +414,4 @@ private fun List<DownloadItem>.toPauseToggleItems(): List<PauseToggleItem> {
         PauseToggleItem(state, willDispatch)
     }
 }
+

@@ -224,15 +224,16 @@ public class FragmentSettingsData extends SettingsPageFragment<FragmentSettingsD
             final TextView sizeText = baseBind.gifCacheSize;
             sizeText.setText("…");
             new Thread(() -> {
-                FileUtils.deleteAllInDir(gifCache);
-                // 播放引擎的内存表还指着刚被删掉的文件。不清的话回详情页会命中
-                // peekReadyInMemory → Glide 加载失败 → 用户看到一个莫名其妙的「重试」。
-                UgoiraEngine.invalidateAll();
+                String failure = null;
+                try { ceui.pixiv.ui.bulk.UgoiraCacheAccess.clear(mContext.getApplicationContext()); }
+                catch (Exception error) { Timber.w(error, "Cannot clear active ugoira cache"); failure = error.getMessage(); }
+                final String clearFailure = failure;
                 sizeText.post(() -> {
                     if (!isAdded()) {
                         return;
                     }
-                    Common.showToast(getString(R.string.success_clearGifCache), 2);
+                    if (clearFailure == null) Common.showToast(getString(R.string.success_clearGifCache), 2);
+                    else Common.showToast(getString(R.string.save_gif_failed, clearFailure), 2);
                     loadCacheSizeAsync(sizeText, gifCache);
                 });
             }, "gif-cache-clear").start();
@@ -877,3 +878,4 @@ public class FragmentSettingsData extends SettingsPageFragment<FragmentSettingsD
         }
     }
 }
+

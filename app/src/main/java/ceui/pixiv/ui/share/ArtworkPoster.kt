@@ -112,6 +112,10 @@ private const val TAG = "ArtworkPoster"
 internal object ArtworkPosterExporter {
 
     suspend fun export(context: Context, illust: Illust, pageIndex: Int): Uri {
+        return ceui.pixiv.download.copy.QueuedImageDerivatives.get(context).poster(illust, pageIndex).uri
+    }
+
+    internal suspend fun exportRaw(context: Context, illust: Illust, pageIndex: Int): Uri {
         val safePage = pageIndex.coerceIn(0, (illust.page_count - 1).coerceAtLeast(0))
         val artworkUrl = IllustDownload.getUrl(
             illust,
@@ -151,27 +155,8 @@ internal object ArtworkPosterExporter {
             )
 
             // 目录和基础文件名完整沿用用户当前的插画模板；仅加 _share 避免覆盖原图。
-            val handle = DownloadsRegistry.downloads.openDerived(
-                DownloadItems.illustPoster(illust, safePage),
-                POSTER_FILENAME_SUFFIX,
-            ) ?: return Uri.EMPTY
-
-            var committed = false
-            try {
-                handle.stream.use { stream ->
-                    check(poster.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, stream)) {
-                        context.getString(R.string.artwork_poster_encode_failed)
-                    }
-                }
-                handle.onFinish()
-                committed = true
-            } finally {
-                if (!committed) {
-                    runCatching { handle.stream.close() }
-                    runCatching { handle.onAbort() }
-                }
-            }
-            return handle.uri
+            return requireNotNull(ceui.pixiv.download.copy.DerivativeRenderSession.current.get())
+                .capture(poster, Bitmap.CompressFormat.JPEG, JPEG_QUALITY)
         } finally {
             artwork?.recycle()
             avatar?.recycle()
@@ -184,23 +169,13 @@ internal object ArtworkPosterExporter {
      * 不再单独走 Glide 网络缓存重下一遍（多 P 的某一页、2048px 解码预算下也一样）。
      */
     private suspend fun loadArtwork(context: Context, illust: Illust, page: Int, url: String): Bitmap {
-        val file = PageImageSourceResolver.resolve(context, illust, page, url).awaitFile(context)
-            ?: error(context.getString(R.string.artwork_poster_image_unavailable))
+        val file = requireNotNull(ceui.pixiv.download.copy.DerivativeRenderSession.current.get()).source
         return decodeSampled(file, MAX_ARTWORK_DECODE_SIZE)
     }
 
     private fun loadBitmap(context: Context, rawUrl: String, maxSide: Int): Bitmap {
-        val model: Any = when {
-            rawUrl.startsWith("content://") || rawUrl.startsWith("file://") -> Uri.parse(rawUrl)
-            rawUrl.startsWith("/") -> File(rawUrl)
-            else -> GlideUrlChild(rawUrl)
-        }
-        val target = Glide.with(context).asFile().load(model).submit()
-        val file = try {
-            target.get()
-        } finally {
-            Glide.with(context).clear(target)
-        }
+        val file = ceui.pixiv.download.copy.DerivativeRenderSession.current.get()?.avatar
+            ?: throw java.io.IOException("Avatar unavailable")
         return decodeSampled(file, maxSide)
     }
 
@@ -671,3 +646,4 @@ internal object ArtworkPosterRenderer {
     private val FALLBACK_AVATAR_START = Color.rgb(93, 185, 255)
     private val FALLBACK_AVATAR_END = Color.rgb(112, 102, 241)
 }
+

@@ -71,6 +71,22 @@ public abstract class DownloadDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     public abstract void insertDownloading(DownloadingEntity entity);
 
+    @Query("SELECT * FROM illust_downloading_table WHERE fileName = :fileName LIMIT 1")
+    public abstract DownloadingEntity getDownloadingByFileName(String fileName);
+
+    /** A late completion/removal must not delete a newer task with the same legacy primary key. */
+    @Query("DELETE FROM illust_downloading_table WHERE fileName = :fileName AND uuid = :uuid")
+    public abstract int deleteDownloadingByIdentity(String fileName, String uuid);
+
+    /** State commands never insert or resurrect a removed task. */
+    @Query("UPDATE illust_downloading_table SET taskGson = :taskGson WHERE fileName = :fileName AND uuid = :uuid")
+    public abstract int updateDownloadingState(String fileName, String uuid, String taskGson);
+
+    @Query("UPDATE illust_downloading_table SET uuid = :newUuid, taskGson = :newJson " +
+            "WHERE fileName = :fileName AND uuid IS :oldUuid AND taskGson IS :oldJson")
+    public abstract int repairDownloadingIdentity(String fileName, String oldUuid, String oldJson,
+                                                 String newUuid, String newJson);
+
     @Delete
     public abstract void deleteDownloading(DownloadingEntity entity);
 
@@ -249,7 +265,7 @@ public abstract class DownloadDao {
      * 未标注的 Java 返回类型在 KSP 里是可空平台类型，会被当成实体去解析而编译失败。
      */
     @NonNull
-    @Query("SELECT rowid, taskGson FROM illust_downloading_table "
+    @Query("SELECT rowid, taskGson, fileName, uuid FROM illust_downloading_table "
             + "WHERE rowid > :after AND rowid <= :through ORDER BY rowid ASC LIMIT :limit")
     public abstract Cursor getDownloadingBatch(long after, long through, int limit);
 
@@ -431,3 +447,4 @@ public abstract class DownloadDao {
     @Query("SELECT * FROM feature_table")
     public abstract List<FeatureEntity> getAllFeatureEntities();
 }
+

@@ -9,6 +9,12 @@ import ceui.pixiv.cache.OriginalImageCacheManager
 import ceui.pixiv.download.StageStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -24,17 +30,43 @@ import java.io.IOException
  * 完成后原子提交至原图专属缓存目录。
  */
 class ResumableOkHttpFetcher(
-    private val clientProvider: () -> OkHttpClient = { (Shaft.getContext() as Shaft).okHttpClient },
+    private val clientProvider: () -> OkHttpClient = {
+        val app = Shaft.getContext() as Shaft
+        // Retain the page download client's H1.1 and interceptor policy after sharing its source.
+        ceui.lisa.core.Manager.buildDownloadOkHttpClient(app.okHttpClient, app.downloadProgress)
+    },
     private val contextProvider: () -> Context = { Shaft.getContext() },
     private val cacheDirProvider: () -> File = { OriginalImageCacheManager.getCacheDir(contextProvider()) },
     private val stagingDirProvider: () -> File = { OriginalImageCacheManager.getStagingDir(contextProvider()) },
+    private val legacyStagingDirProvider: () -> File? = { null },
 ) : ImageFetcher {
 
     companion object : ImageFetcher {
-        private val defaultInstance = ResumableOkHttpFetcher()
+        private val defaultInstance = ResumableOkHttpFetcher(
+            legacyStagingDirProvider = { File(Shaft.getContext().cacheDir, StageStore.STAGE_DIR_NAME) },
+        )
 
-        override suspend fun fetch(url: String, onProgress: (Int) -> Unit): File =
-            defaultInstance.fetch(url, onProgress)
+        private val queued by lazy {
+            OriginalTransferQueue(
+                ceui.pixiv.download.queue.ContentQueueRuntime.get(Shaft.getContext()),
+                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO),
+                defaultInstance,
+                { OriginalImageCacheManager.find(Shaft.getContext(), it) },
+                { OriginalImageCacheManager.pin(OriginalImageCacheManager.getCacheDir(Shaft.getContext()),
+                    OriginalImageCacheManager.getStagingDir(Shaft.getContext()), it) },
+                { Shaft.sSettings.maxConcurrentDownloads },
+                { error, saving -> GlideImageFetcher.isReadTimeout(error) &&
+                    (Shaft.sSettings.isImageLoadRetryOnStall || (saving && Shaft.sSettings.isImageReadTimeoutLowered)) },
+            )
+        }
+
+        suspend fun acquire(url: String, onProgress: (Int) -> Unit, saving: Boolean = false): OriginalFileLease =
+            queued.acquire(url, onProgress, saving)
+
+        override suspend fun fetch(url: String, onProgress: (Int) -> Unit): File = withContext(Dispatchers.IO) {
+            // The caller may be Main: cache-pin release also shares a lock with IO eviction.
+            acquire(url, onProgress).use { it.file }
+        }
     }
 
     // 调用方是 ImageTaskRegistry.scope（Main.immediate）：从查缓存、读 .part / manifest 起就全在 IO 上做。
@@ -55,14 +87,19 @@ class ResumableOkHttpFetcher(
         val partFile = StageStore.partFile(stagingDir, key)
         val metaFile = StageStore.metaFile(stagingDir, key)
 
+        adoptLegacyStage(url, stagingDir, legacyStagingDirProvider())
         var existingLen = if (partFile.isFile) partFile.length() else 0L
         var manifest = if (existingLen > 0) StageStore.readManifest(metaFile) else null
 
-        if (manifest != null && manifest.total > 0 && existingLen > manifest.total) {
+        if (manifest != null && (manifest.url != url || (manifest.total > 0 && existingLen > manifest.total))) {
             Timber.w("[ResumableFetcher] stage overshoot existing=$existingLen total=${manifest.total}, reset")
             StageStore.clear(stagingDir, key)
             existingLen = 0L
             manifest = null
+        }
+
+        if (manifest != null && manifest.url == url && manifest.total > 0 && existingLen == manifest.total) {
+            return@withContext OriginalImageCacheManager.commit(cacheDir, stagingDir, url, partFile)
         }
 
         val networkUrl = ImageHostManager.rewrite(url)
@@ -89,12 +126,17 @@ class ResumableOkHttpFetcher(
         val client = clientProvider()
 
         val call = client.newCall(request)
+        // Interruption alone need not unblock a platform socket read. Close the actual call as soon
+        // as the owning transfer is cancelled; its queue lease still waits for this worker to exit.
+        val stopping = CoroutineScope(currentCoroutineContext()).launch(Dispatchers.IO, start = CoroutineStart.UNDISPATCHED) {
+            try { awaitCancellation() } finally { call.cancel() }
+        }
         var response: Response? = null
         try {
             response = runInterruptible { call.execute() }
             val code = response.code
             if (!response.isSuccessful && code != 416) {
-                throw IOException("HTTP $code ${response.message}")
+                throw ImageHttpException(code, "HTTP $code ${response.message}")
             }
 
             val body = response.body
@@ -178,8 +220,42 @@ class ResumableOkHttpFetcher(
         } catch (ce: CancellationException) {
             call.cancel()
             throw ce
+        } catch (error: Exception) {
+            // The cancellation watcher can surface SocketException rather than CE from OkHttp.
+            currentCoroutineContext().ensureActive()
+            throw error
         } finally {
+            stopping.cancel()
             response?.close()
         }
     }
+    /** Copy only validated old network partials; the original journal is retained until output succeeds. */
+    internal fun adoptLegacyStage(url: String, destination: File, legacy: File?) {
+        if (legacy == null || legacy.absolutePath == destination.absolutePath) return
+        val key = StageStore.keyForUrl(url)
+        val target = StageStore.partFile(destination, key)
+        if (target.exists()) return
+        val source = StageStore.partFile(legacy, key)
+        val manifest = StageStore.readManifest(StageStore.metaFile(legacy, key)) ?: return
+        if (manifest.url != url || !source.isFile || source.length() <= 0 ||
+            (manifest.total >= 0 && source.length() > manifest.total)) return
+        val temporary = File(destination, "$key.adopting")
+        try {
+            source.copyTo(temporary, overwrite = true)
+            if (!temporary.renameTo(target)) throw IOException("Cannot adopt old image stage")
+            StageStore.writeManifest(StageStore.metaFile(destination, key), manifest)
+            if (StageStore.readManifest(StageStore.metaFile(destination, key)) != manifest) {
+                StageStore.clear(destination, key)
+            }
+        } catch (error: Exception) {
+            temporary.delete()
+            StageStore.clear(destination, key)
+            Timber.tag("ContentQueue").w(error, "Old image stage kept for retry")
+        }
+    }
+
 }
+
+
+/** Typed status retained for external providers that retire deleted/private artwork on 4xx. */
+class ImageHttpException(val statusCode: Int, message: String) : IOException(message)

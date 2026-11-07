@@ -1,0 +1,126 @@
+name: Unified queue regression
+on:
+  push:
+    branches: [feat/unified-content-queue]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Test durable admission, worker shutdown, recovery and dispatch scopes
+        run: |
+          bash ./gradlew :app:testGithubDebugUnitTest --console=plain --build-cache \
+            -PSHAFT_TEST_ABI=arm64-v8a -PSHAFT_BETA_TEST=true \
+            --tests ceui.pixiv.download.copy.LocalOutputsTest \
+            --tests ceui.pixiv.sticker.StickerStoreTest \
+            --tests ceui.pixiv.muzei.QueuedMuzeiStreamTest \
+            --tests ceui.pixiv.ui.detail.frames.FrameExportQueueTest \
+            --tests ceui.pixiv.ui.novel.reader.settings.ReaderFontQueueTest \
+            --tests ceui.pixiv.download.copy.ImageDerivativeQueueTest \
+            --tests ceui.pixiv.ui.download.UnifiedContentTasksTest \
+            --tests ceui.pixiv.download.queue.ContentQueueArbiterTest \
+            --tests ceui.pixiv.ui.novel.reader.export.NovelGroupQueueTest \
+            --tests ceui.pixiv.download.queue.ContentResourceLeasesTest \
+            --tests ceui.pixiv.snapshot.SnapshotOperationsTest \
+            --tests ceui.pixiv.snapshot.SnapshotPlanSessionTest \
+            --tests ceui.pixiv.ui.bulk.UgoiraCacheGateTest \
+            --tests ceui.pixiv.ui.bulk.UgoiraParentTest \
+            --tests ceui.pixiv.download.queue.ArtifactPublisherTest \
+            --tests ceui.pixiv.ui.novel.reader.export.NovelExportRequestTest \
+            --tests ceui.pixiv.ui.novel.reader.export.NovelQueuedExportTest \
+            --tests ceui.pixiv.ui.novel.reader.export.NovelExportFormatTest \
+            --tests ceui.pixiv.ui.common.NovelExportRoutingTest \
+            --tests ceui.pixiv.download.model.ModelInstallerTest \
+            --tests ceui.pixiv.download.model.ModelSharedQueueTest \
+            --tests ceui.pixiv.download.queue.ContentPlanStoreTest \
+            --tests ceui.pixiv.download.queue.ContentPlanQueueTest \
+            --tests ceui.pixiv.download.queue.ContentPlanTicketTest \
+            --tests ceui.lisa.update.ApkSharedQueueTest \
+            --tests ceui.lisa.update.AppUpdateCheckerTest \
+            --tests ceui.pixiv.snapshot.SnapshotAssetTransfersTest \
+            --tests ceui.pixiv.snapshot.SnapshotPathSafetyTest \
+            --tests ceui.pixiv.snapshot.SnapshotUgoiraValidationTest \
+            --tests ceui.pixiv.snapshot.SnapshotParallelMapTest \
+            --tests ceui.pixiv.download.queue.ContentPhaseRunnerTest \
+            --tests ceui.pixiv.ui.bulk.UgoiraQueuedZipTest \
+            --tests ceui.pixiv.ui.bulk.UgoiraZipResumeTest \
+            --tests ceui.pixiv.ui.bulk.UgoiraFrameTimingTest \
+            --tests ceui.pixiv.download.copy.DurableCopyQueueTest \
+            --tests ceui.pixiv.download.copy.CopyInputReferencesTest \
+            --tests ceui.pixiv.download.copy.CopyCheckpointTest \
+            --tests ceui.pixiv.download.copy.ImagePageSaverQueueTest \
+            --tests ceui.pixiv.download.DownloadsFacadeTest \
+            --tests ceui.pixiv.imageloader.OriginalTransferQueueSocketTest \
+            --tests ceui.pixiv.imageloader.OriginalTransferQueueTest \
+            --tests ceui.pixiv.imageloader.ResumableOkHttpFetcherTest \
+            --tests ceui.pixiv.imageloader.PageImageSourceResolverTest \
+            --tests ceui.pixiv.imageloader.ImageLoadTaskTest \
+            --tests ceui.pixiv.cache.OriginalImageCacheManagerTest \
+            --tests ceui.lisa.core.PageSharedSourceTest \
+            --tests ceui.pixiv.download.queue.ContentQueueStoreTest \
+            --tests ceui.lisa.core.ManagerOutputCommitTest \
+            --tests ceui.lisa.core.PageQueueOwnerTest \
+            --tests ceui.lisa.core.ManagerCoreDispatchTest \
+            --tests ceui.lisa.core.ManagerAdmissionTest \
+            --tests ceui.lisa.core.PageQueueCompatibilityTest \
+            --tests ceui.pixiv.download.LegacyPageSaveMigrationTest \
+            --tests ceui.pixiv.download.DownloadRecordStateSourceTest \
+            --tests ceui.pixiv.download.DownloadedPageIndexTest \
+            --tests ceui.pixiv.db.queue.DownloadQueueDaoTest \
+            --tests ceui.lisa.database.DownloadDaoDoneCardCountTest \
+            --tests ceui.lisa.database.DownloadDaoDeleteAllTest \
+            --tests ceui.lisa.core.ManagerRestoreTest \
+            --tests ceui.lisa.core.DownloadTaskTest \
+            --tests ceui.lisa.core.ManagerStagingConcurrencyTest \
+            --tests ceui.lisa.core.ManagerSlowTransferTest \
+            --tests ceui.lisa.core.ManagerManualQueueTest \
+            --tests ceui.lisa.core.ManagerDispatchScopeTest \
+            --tests ceui.lisa.core.ManagerStartOneScopeTest \
+            --tests ceui.pixiv.ui.detail.PageDownloadFabStateTest
+      - name: Summarize regression results
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          rows = []
+          for path in sorted(Path('app/build/test-results').rglob('TEST-*.xml')):
+              root = ET.parse(path).getroot()
+              for case in root.findall('testcase'):
+                  for problem in list(case.findall('failure')) + list(case.findall('error')):
+                      print(f"FAILED {root.attrib.get('name')} :: {case.attrib.get('name')}")
+                      print((problem.text or problem.attrib.get('message', ''))[:16000])
+              rows.append((root.attrib.get('name', path.stem), *(int(root.attrib.get(k, 0)) for k in ('tests', 'failures', 'errors', 'skipped'))))
+          totals = [sum(row[i] for row in rows) for i in range(1, 5)]
+          report = ['| Suite | Tests | Failures | Errors | Skipped |', '| --- | ---: | ---: | ---: | ---: |']
+          report += ['| ' + ' | '.join(map(str, row)) + ' |' for row in rows]
+          report += ['| TOTAL | ' + ' | '.join(map(str, totals)) + ' |']
+          print('\n'.join(report) if rows else 'No JUnit reports produced; inspect the Gradle step.')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('\n'.join(report) if rows else 'No JUnit reports produced.\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unified-queue-regression
+          path: |
+            app/build/reports/tests/
+            app/build/test-results/
+          if-no-files-found: ignore
+

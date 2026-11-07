@@ -234,4 +234,25 @@ class DownloadsFacadeTest {
         // Placeholder assertion: store semantics tested via LoadResult shape alone
         // since MMKV requires Android. The intent is documented in the kdoc.
     }
+    @Test fun `queued destination rendering does not probe backend or storage`() {
+        val facade = Downloads(configWith(template = "Frozen/{author}/{id}.{ext}")) { error("no backend lookup before claim") }
+        assertEquals("Frozen/b/1_translated.png", facade.resolveDerivedPath(item, "_translated").joinTo())
+    }
+
+    @Test fun `resolved queued output retains storage and path after global configuration changes`() {
+        val frozenStorage = StorageChoice.MediaStore(StorageChoice.MediaStore.Collection.Images)
+        val changedStorage = StorageChoice.MediaStore(StorageChoice.MediaStore.Collection.Downloads)
+        val frozenBackend = FakeBackend().apply { seed("Frozen/page_translated.png") }
+        val facade = Downloads(DownloadConfig(defaults = BucketDefaults(template = "Changed/{id}.{ext}",
+            storage = changedStorage, overwrite = OverwritePolicy.Replace))) { choice ->
+            assertEquals(frozenStorage, choice)
+            frozenBackend
+        }
+        assertEquals(null, facade.openResolved(frozenStorage, RelativePath(listOf("Frozen", "page_translated.png")),
+            "image/png", OverwritePolicy.Skip))
+        assertEquals(1, frozenBackend.skipProbeCalls)
+        assertTrue(frozenBackend.deleted.isEmpty())
+    }
+
 }
+

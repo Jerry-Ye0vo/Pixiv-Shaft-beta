@@ -45,25 +45,15 @@ class ShaftMuzeiArtProvider : MuzeiArtProvider() {
         val persistentUri = artwork.persistentUri
             ?: throw IllegalStateException("artwork ${artwork.token} has no persistentUri")
         val url = ImageHostManager.rewrite(persistentUri.toString())
-        val request = Request.Builder()
-            .url(url)
-            .header(Params.MAP_KEY, Params.IMAGE_REFERER)
-            .header(Params.USER_AGENT, Params.PHONE_MODEL)
-            .build()
-        val response = imageClient.newCall(request).execute()
-        if (!response.isSuccessful) {
-            response.close()
-            // 4xx 大概率是作品已删除/私密:抛非 IOException 让 Muzei 走 onInvalidArtwork 剔掉,不反复重试
-            if (response.code in 400..499) {
-                throw IllegalStateException("HTTP ${response.code} for ${artwork.token}")
+        val lease = try {
+            kotlinx.coroutines.runBlocking(kotlinx.coroutines.Dispatchers.IO) {
+                ceui.pixiv.imageloader.ResumableOkHttpFetcher.acquire(url, {}, saving = true)
             }
-            throw IOException("HTTP ${response.code} for ${artwork.token}")
+        } catch (error: ceui.pixiv.imageloader.ImageHttpException) {
+            if (error.statusCode in 400..499) throw IllegalStateException("HTTP ${error.statusCode} for ${artwork.token}", error)
+            throw error
         }
-        val body = response.body ?: run {
-            response.close()
-            throw IOException("empty body for ${artwork.token}")
-        }
-        return body.byteStream()
+        return queuedMuzeiStream(lease)
     }
 
     override fun getArtworkInfo(artwork: Artwork): PendingIntent? {
@@ -126,14 +116,18 @@ class ShaftMuzeiArtProvider : MuzeiArtProvider() {
     companion object {
         private const val TAG = "MuzeiProvider"
 
-        /**
-         * 复用 app 的图片 client(直连 HttpDns / 无 SNI / 代理 host 都在里面),只放宽读超时:
-         * 原图动辄 10MB+,Muzei 是后台慢慢拉,不必卡 Glide 的默认超时。
-         */
-        private val imageClient: OkHttpClient by lazy {
-            (Shaft.getContext() as Shaft).okHttpClient.newBuilder()
-                .readTimeout(120, TimeUnit.SECONDS)
-                .build()
-        }
+
     }
+}
+
+
+internal fun queuedMuzeiStream(lease: ceui.pixiv.imageloader.OriginalFileLease): InputStream {
+    try {
+        return object : java.io.FilterInputStream(lease.file.inputStream()) {
+            private val closed = java.util.concurrent.atomic.AtomicBoolean()
+            override fun close() {
+                if (closed.compareAndSet(false, true)) try { super.close() } finally { lease.close() }
+            }
+        }
+    } catch (error: Throwable) { lease.close(); throw error }
 }

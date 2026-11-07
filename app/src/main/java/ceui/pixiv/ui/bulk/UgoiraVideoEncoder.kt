@@ -111,6 +111,18 @@ internal object UgoiraVideoEncoder {
         files: List<File>,
         delaysMs: List<Int>,
         onProgress: (Int) -> Unit = {},
+    ): File? = ceui.pixiv.download.queue.ContentPhases.run("ugoira", "video",
+        "ugoira-video:" + target.absolutePath, ceui.pixiv.download.queue.ContentQueueStore.Pool.ENCODE,
+        com.google.gson.Gson().toJson(mapOf("target" to target.absolutePath))) {
+        encodeClaimed(target, files, delaysMs, onProgress)
+    }
+
+    // The shared claim is acquired before EGL is initialized. This body has no suspension points.
+    private suspend fun encodeClaimed(
+        target: File,
+        files: List<File>,
+        delaysMs: List<Int>,
+        onProgress: (Int) -> Unit,
     ): File? = withContext(Dispatchers.IO) {
         if (deviceUnsupported) return@withContext null
         if (files.size < MIN_FRAMES || files.size != delaysMs.size) return@withContext null
@@ -504,3 +516,4 @@ private fun floatBufferOf(vararg values: Float): FloatBuffer =
             put(values)
             position(0)
         }
+
