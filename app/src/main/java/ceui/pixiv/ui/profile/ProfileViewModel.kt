@@ -32,7 +32,7 @@ internal class ProfileViewModel(application: Application) : AndroidViewModel(app
 
     fun load(force: Boolean = false) {
         val uid = SessionManager.loggedInUid
-        if (!force && mutable.value.uid == uid) return
+        if (!force && analysis != null && mutable.value.uid == uid) return
         analysis?.cancel()
         if (mutable.value.uid != uid) mutable.value = ProfileUiState(uid = uid)
         analysis = viewModelScope.launch {

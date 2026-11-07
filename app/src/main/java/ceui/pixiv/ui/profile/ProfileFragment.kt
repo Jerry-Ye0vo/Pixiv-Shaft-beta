@@ -175,7 +175,6 @@ class ProfileFragment : Fragment(R.layout.fragment_local_profile) {
         val ready = LocalTaggerModel.ready(app)
         val download = LocalTaggerModel.current(app)?.status?.value
         val job = QueuedProfileTagging.get(app).current()?.status?.value
-        val active = setOf(State.RUNNING, State.QUEUED, State.PAUSE_REQUESTED, State.CANCEL_REQUESTED)
         u.modelState.text = when {
             ready -> getString(R.string.profile_model_ready)
             download?.error != null -> getString(R.string.profile_error, download.error)
@@ -197,7 +196,7 @@ class ProfileFragment : Fragment(R.layout.fragment_local_profile) {
             State.PAUSED, State.FAILED -> R.string.profile_tagging_resume
             else -> R.string.profile_tagging_start
         })
-        u.forceAction.isVisible = ready && job?.state !in active
+        u.forceAction.isVisible = ready && (job == null || job.state in setOf(State.SUCCEEDED, State.CANCELLED))
         u.tagProgress.text = if (job?.error != null) getString(R.string.profile_error, job.error)
             else progress?.let { getString(R.string.profile_tagging_result, it.scanned, it.inferred,
                 it.reused, it.skipped, it.failed, it.perMinute) } ?: ""

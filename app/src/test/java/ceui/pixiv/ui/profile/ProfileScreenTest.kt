@@ -80,6 +80,12 @@ class ProfileScreenTest {
             assertTrue("width=${content.measuredWidth}, density=${root.resources.displayMetrics.density}", content.measuredWidth<=720 * root.resources.displayMetrics.density)
             fun texts(view: View): List<TextView> = if (view is android.view.ViewGroup)
                 (0 until view.childCount).flatMap { texts(view.getChildAt(it)) } else listOfNotNull(view as? TextView)
+            val source = content.getChildAt(7) as android.widget.RadioGroup
+            assertEquals("The active statistics source must be checked", 0x00c54000, source.checkedRadioButtonId)
+            assertTrue((source.getChildAt(0) as android.widget.RadioButton).isChecked)
+            source.getChildAt(1).performClick()
+            assertEquals(0x00c54001, source.checkedRadioButtonId)
+            source.getChildAt(0).performClick()
             val controls = texts(root).filter { it.isClickable && it.visibility == View.VISIBLE && it.text.isNotBlank() }
             assertTrue(controls.any { it.text.toString()==activity.getString(R.string.profile_refresh) })
             assertTrue(controls.any { it.text.toString()==activity.getString(R.string.profile_model_download) })
